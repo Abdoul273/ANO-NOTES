@@ -1,0 +1,6 @@
+{
+  "name": "AuraTask AI - Gestionnaire de Tâches & Productivité Intelligente",
+  "description": "Gestionnaire de tâches ultra-épuré doté d'une IA d'optimisation, priorisation automatique, synchronisation calendrier, rappels sur-mesure, mode hors-ligne et rapports PDF/CSV.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
