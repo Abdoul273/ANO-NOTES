@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# natif / Tauri
+src-tauri/target
+src-tauri/gen/schemas

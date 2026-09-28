@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
@@ -14,6 +15,44 @@ const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '15mb' }));
+
+// The browser and the Caelestia panel share this locked, local task store.
+const taskStoreScript = path.resolve(__dirname, 'scripts/tasks_store.py');
+
+function taskStore(command: 'read' | 'import' | 'apply', payload?: unknown): Promise<{ revision: number; tasks: any[] }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', [taskStoreScript, command, '-']);
+    let output = '';
+    let error = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { output += chunk; });
+    child.stderr.on('data', (chunk: string) => { error += chunk; });
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error(error || `Task store exited with ${code}`));
+      try { resolve(JSON.parse(output)); } catch (cause) { reject(cause); }
+    });
+    child.stdin.end(payload === undefined ? '' : JSON.stringify(payload));
+  });
+}
+
+app.get('/api/local-tasks', async (_req, res) => {
+  try { res.json(await taskStore('read')); }
+  catch (error) { console.error('Task read failed:', error); res.status(500).json({ error: 'task_store_unavailable' }); }
+});
+
+app.post('/api/local-tasks/import', async (req, res) => {
+  if (!Array.isArray(req.body?.tasks)) return res.status(400).json({ error: 'invalid_tasks' });
+  try { res.json(await taskStore('import', req.body.tasks)); }
+  catch (error) { console.error('Task import failed:', error); res.status(500).json({ error: 'task_store_unavailable' }); }
+});
+
+app.post('/api/local-tasks/apply', async (req, res) => {
+  if (!Array.isArray(req.body?.operations)) return res.status(400).json({ error: 'invalid_operations' });
+  try { res.json(await taskStore('apply', req.body.operations)); }
+  catch (error) { console.error('Task update failed:', error); res.status(500).json({ error: 'task_store_unavailable' }); }
+});
 
 // Server-side Gemini API client
 const ai = new GoogleGenAI({

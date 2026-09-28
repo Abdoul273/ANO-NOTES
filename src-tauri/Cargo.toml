@@ -1,0 +1,26 @@
+[package]
+name = "gestionnaire-de-taches"
+version = "0.0.0"
+description = "Gestionnaire de Taches, application de bureau"
+authors = ["Abdoul Goudousse Diallo"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+# Binaire final plus petit et plus rapide.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

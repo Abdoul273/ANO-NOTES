@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Task,
   UserHabits,
@@ -21,6 +21,7 @@ import {
   saveBriefingToStorage,
 } from './utils/storage';
 import { soundManager } from './utils/audio';
+import { LocalTaskSync } from './utils/localTaskSync';
 import { exportTasksToCSV, exportTasksToPDF } from './utils/export';
 import { callAiPrioritize, callAiDailyBriefing } from './utils/ai';
 
@@ -60,6 +61,7 @@ export default function App() {
 
   // App core state
   const [tasks, setTasks] = useState<Task[]>(() => loadTasksFromStorage());
+  const taskSync = useRef<LocalTaskSync | null>(null);
   const [habits, setHabits] = useState<UserHabits>(() => loadHabitsFromStorage());
   const [profile, setProfile] = useState<UserProfile>(() => loadProfileFromStorage());
   const [categories, setCategories] = useState(() => loadCategoriesFromStorage());
@@ -113,9 +115,18 @@ export default function App() {
     };
   }, []);
 
-  // Sync storage on task state change
+  // Migrate browser tasks once, then share every change with the Caelestia panel.
+  useEffect(() => {
+    const sync = new LocalTaskSync(setTasks);
+    taskSync.current = sync;
+    void sync.start(tasks);
+    return () => { sync.stop(); taskSync.current = null; };
+  }, []);
+
+  // Keep a browser copy for offline use while the local shared store is unavailable.
   useEffect(() => {
     saveTasksToStorage(tasks);
+    taskSync.current?.queue(tasks);
   }, [tasks]);
 
   useEffect(() => {
