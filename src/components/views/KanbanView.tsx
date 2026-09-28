@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { soundManager } from '../../utils/audio';
+import { urgencyScore, isOverdue } from '../../utils/scoring';
+import { formatDue } from '../../utils/dates';
 
 interface KanbanViewProps {
   tasks: Task[];
@@ -331,10 +333,10 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                             </span>
                           </div>
 
-                          {task.aiUrgencyScore && (
-                            <span className="flex items-center gap-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded shrink-0">
+                          {!task.completed && (
+                            <span className="flex items-center gap-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded shrink-0" title="Score d'urgence">
                               <Sparkles className="w-2.5 h-2.5" />
-                              {task.aiUrgencyScore}
+                              {urgencyScore(task)}
                             </span>
                           )}
                         </div>
@@ -347,12 +349,9 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                         {/* Meta Footer */}
                         <div className="flex items-center justify-between pt-1 border-t border-zinc-100 dark:border-zinc-700/40 text-[10px] text-zinc-400">
                           {task.dueDate ? (
-                            <span className="flex items-center gap-1">
+                            <span className={`flex items-center gap-1 ${isOverdue(task) ? 'text-rose-500 font-semibold' : ''}`}>
                               <Calendar className="w-3 h-3" />
-                              {new Date(task.dueDate).toLocaleDateString('fr-FR', {
-                                day: 'numeric',
-                                month: 'short',
-                              })}
+                              {formatDue(task.dueDate)}
                             </span>
                           ) : (
                             <span>Sans échéance</span>

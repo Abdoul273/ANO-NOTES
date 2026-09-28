@@ -19,12 +19,16 @@ import {
 import { Task, Priority, TaskStatus, SubTask, SmartReminder, UserHabits } from '../types';
 import { callAiBreakdown, callAiSmartReminders } from '../utils/ai';
 import { createGoogleCalendarUrl } from '../utils/export';
+import { openExternal } from '../utils/platform';
+import { localDateKey, localTimeKey, fromLocalInputs, isValidDate } from '../utils/dates';
 
 interface TaskModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (task: Task) => void;
+  onDelete?: (taskId: string) => void;
   taskToEdit?: Task | null;
+  defaults?: Partial<Task> | null;
   categories: { id: string; name: string; color: string }[];
   userHabits: UserHabits;
 }
@@ -33,7 +37,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  onDelete,
   taskToEdit,
+  defaults,
   categories,
   userHabits,
 }) => {
@@ -50,6 +56,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [smartReminders, setSmartReminders] = useState<SmartReminder[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [newTag, setNewTag] = useState('');
+  const [newReminderAt, setNewReminderAt] = useState('');
 
   const [isBreakingDown, setIsBreakingDown] = useState(false);
   const [isGeneratingReminders, setIsGeneratingReminders] = useState(false);
@@ -76,9 +83,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setStatus(taskToEdit.status);
       setCategory(taskToEdit.category || categories[0]?.name || 'Travail');
       if (taskToEdit.dueDate) {
-        const d = new Date(taskToEdit.dueDate);
-        setDueDate(d.toISOString().substring(0, 10));
-        setDueTime(d.toTimeString().substring(0, 5));
+        setDueDate(localDateKey(taskToEdit.dueDate));
+        setDueTime(localTimeKey(taskToEdit.dueDate));
       } else {
         setDueDate('');
         setDueTime('17:00');
@@ -88,21 +94,26 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setSmartReminders(taskToEdit.smartReminders || []);
       setTags(taskToEdit.tags || []);
     } else {
-      // Default clean task
-      setTitle('');
+      // Nouvelle tâche (valeurs pré-remplies depuis le Kanban, le calendrier ou la matrice)
+      setTitle(defaults?.title || '');
       setDescription('');
-      setPriority('medium');
-      setStatus('todo');
-      setCategory(categories[0]?.name || 'Travail');
-      const tomorrow = new Date(Date.now() + 86400000);
-      setDueDate(tomorrow.toISOString().substring(0, 10));
-      setDueTime('17:00');
+      setPriority(defaults?.priority || 'medium');
+      setStatus(defaults?.status || 'todo');
+      setCategory(defaults?.category || categories[0]?.name || 'Travail');
+      if (defaults?.dueDate) {
+        setDueDate(defaults.dueDate.length === 10 ? defaults.dueDate : localDateKey(defaults.dueDate));
+        setDueTime(defaults.dueDate.length === 10 ? '17:00' : localTimeKey(defaults.dueDate));
+      } else {
+        setDueDate('');
+        setDueTime('17:00');
+      }
       setEstimatedMinutes(30);
       setSubtasks([]);
       setSmartReminders([]);
       setTags([]);
     }
-  }, [taskToEdit, isOpen]);
+    setNewReminderAt('');
+  }, [taskToEdit, defaults, isOpen]);
 
   if (!isOpen) return null;
 
@@ -236,26 +247,44 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     if (!title.trim()) return;
     setIsGeneratingReminders(true);
     try {
-      const constructedDue = dueDate ? new Date(`${dueDate}T${dueTime || '12:00'}:00`).toISOString() : null;
+      const constructedDue = fromLocalInputs(dueDate, dueTime);
       const res = await callAiSmartReminders(
         { title, description, priority, dueDate: constructedDue, estimatedMinutes },
         userHabits
       );
       if (res.reminders && res.reminders.length > 0) {
-        const created: SmartReminder[] = res.reminders.map((r: any) => ({
+        const created: SmartReminder[] = res.reminders.filter((r: any) => isValidDate(r.time)).map((r: any) => ({
           id: 'rem_' + Math.random().toString(36).substring(2, 8),
-          time: r.time,
-          label: r.label,
+          time: new Date(r.time).toISOString(),
+          label: r.label || 'Rappel',
           reason: r.reason,
           triggered: false,
         }));
-        setSmartReminders(created);
+        setSmartReminders((prev) => [...prev.filter((r) => r.triggered), ...created]);
       }
     } catch (err) {
       console.error('Smart reminders error:', err);
     } finally {
       setIsGeneratingReminders(false);
     }
+  };
+
+  const handleAddReminder = () => {
+    if (!isValidDate(newReminderAt)) return;
+    setSmartReminders((prev) => [
+      ...prev,
+      {
+        id: 'rem_' + Math.random().toString(36).substring(2, 10),
+        time: new Date(newReminderAt).toISOString(),
+        label: 'Rappel',
+        triggered: false,
+      },
+    ].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()));
+    setNewReminderAt('');
+  };
+
+  const handleDeleteReminder = (id: string) => {
+    setSmartReminders((prev) => prev.filter((r) => r.id !== id));
   };
 
   const handleAddSubtask = () => {
@@ -294,12 +323,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setTags((prev) => prev.filter((t) => t !== tagToDelete));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent | React.MouseEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
-    const constructedDue = dueDate ? new Date(`${dueDate}T${dueTime || '12:00'}:00`).toISOString() : null;
+    const constructedDue = fromLocalInputs(dueDate, dueTime);
     const catColor = categories.find((c) => c.name === category)?.color || '#6366f1';
+    // Une analyse IA ne vaut plus si la priorité ou l'échéance a changé.
+    const aiStillValid = !!taskToEdit && taskToEdit.priority === priority && taskToEdit.dueDate === constructedDue;
+    // Un rappel déplacé dans le futur doit pouvoir sonner à nouveau.
+    const reminders = smartReminders.map((r) =>
+      r.triggered && new Date(r.time).getTime() > Date.now() ? { ...r, triggered: false, notified: false } : r
+    );
 
     const savedTask: Task = {
       id: taskToEdit ? taskToEdit.id : 'task_' + Date.now(),
@@ -317,21 +352,32 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       updatedAt: new Date().toISOString(),
       tags,
       subtasks,
-      smartReminders,
-      aiUrgencyScore: taskToEdit?.aiUrgencyScore || (priority === 'urgent' ? 90 : priority === 'high' ? 75 : 50),
-      aiQuadrant: taskToEdit?.aiQuadrant || (priority === 'urgent' ? 'q1_urgent_important' : 'q2_not_urgent_important'),
-      aiSlotRecommendation: taskToEdit?.aiSlotRecommendation,
-      aiReasoning: taskToEdit?.aiReasoning,
+      smartReminders: reminders,
+      ...(aiStillValid
+        ? {
+            aiUrgencyScore: taskToEdit!.aiUrgencyScore,
+            aiQuadrant: taskToEdit!.aiQuadrant,
+            aiSlotRecommendation: taskToEdit!.aiSlotRecommendation,
+            aiReasoning: taskToEdit!.aiReasoning,
+          }
+        : {}),
       color: catColor,
     };
+    for (const key of ['aiUrgencyScore', 'aiQuadrant', 'aiSlotRecommendation', 'aiReasoning'] as const) {
+      if (savedTask[key] === undefined) delete savedTask[key];
+    }
 
     onSave(savedTask);
     handleCloseModal();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto animate-in fade-in duration-200">
-      <div className="relative w-full max-w-2xl rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6 sm:p-7 text-zinc-900 dark:text-zinc-100 max-h-[92vh] flex flex-col">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) handleCloseModal(); }}
+      onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleSubmit(e as unknown as React.FormEvent); }}
+    >
+      <div role="dialog" aria-modal="true" className="relative w-full max-w-2xl rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6 sm:p-7 text-zinc-900 dark:text-zinc-100 max-h-[92vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-zinc-100 dark:border-zinc-800">
           <div className="flex items-center gap-2">
@@ -397,6 +443,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               onChange={(e) => setTitle(e.target.value)}
               placeholder="ex: Rédiger le rapport d'audit et préparer la présentation"
               required
+              autoFocus
               className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
             />
           </div>
@@ -463,6 +510,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                     {c.name}
                   </option>
                 ))}
+                {category && !categories.some((c) => c.name === category) && (
+                  <option value={category}>{category}</option>
+                )}
               </select>
             </div>
           </div>
@@ -478,8 +528,28 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 value={dueDate}
                 onChange={(e) => setDueDate(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-              >
-              </input>
+              />
+              <div className="flex gap-1 mt-1.5">
+                {[['Auj.', 0], ['Demain', 1], ['+1 sem.', 7]].map(([label, days]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => setDueDate(localDateKey(Date.now() + Number(days) * 86400000))}
+                    className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-500 hover:text-indigo-500"
+                  >
+                    {label}
+                  </button>
+                ))}
+                {dueDate && (
+                  <button
+                    type="button"
+                    onClick={() => setDueDate('')}
+                    className="px-1.5 py-0.5 rounded-md text-[10px] font-medium text-zinc-400 hover:text-rose-500"
+                  >
+                    Aucune
+                  </button>
+                )}
+              </div>
             </div>
 
             <div>
@@ -503,7 +573,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 min="5"
                 step="5"
                 value={estimatedMinutes}
-                onChange={(e) => setEstimatedMinutes(Number(e.target.value))}
+                onChange={(e) => setEstimatedMinutes(Math.max(0, Number(e.target.value)))}
                 className="w-full px-3 py-2 rounded-xl bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
               />
             </div>
@@ -628,22 +698,48 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         <p className="text-[10px] text-zinc-500 dark:text-zinc-400">{rem.reason}</p>
                       )}
                     </div>
-                    <span className="text-[11px] font-mono font-medium px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-500">
-                      {new Date(rem.time).toLocaleTimeString('fr-FR', {
-                        day: '2-digit',
-                        month: 'short',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={`text-[11px] font-mono font-medium px-2 py-0.5 rounded ${rem.triggered ? 'bg-zinc-500/10 text-zinc-400 line-through' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                        {new Date(rem.time).toLocaleString('fr-FR', {
+                          day: '2-digit',
+                          month: 'short',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteReminder(rem.id)}
+                        className="text-zinc-400 hover:text-rose-500"
+                        title="Supprimer le rappel"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
             ) : (
               <p className="text-[11px] text-zinc-400 italic">
-                Aucun rappel configuré. Cliquez sur « Suggérer des rappels IA » pour adapter selon vos heures de travail.
+                Aucun rappel configuré. Ajoutez-en un ci-dessous ou laissez l'IA en suggérer.
               </p>
             )}
+            <div className="flex gap-2 mt-2">
+              <input
+                type="datetime-local"
+                value={newReminderAt}
+                onChange={(e) => setNewReminderAt(e.target.value)}
+                className="flex-1 px-3 py-1.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 text-xs"
+              />
+              <button
+                type="button"
+                onClick={handleAddReminder}
+                disabled={!newReminderAt}
+                className="px-3 py-1.5 rounded-xl bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 text-xs font-medium disabled:opacity-40"
+              >
+                Ajouter un rappel
+              </button>
+            </div>
           </div>
 
           {/* Tags */}
@@ -696,17 +792,28 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         {/* Footer Actions */}
         <div className="pt-4 mt-4 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
           <div className="text-xs text-zinc-400">
-            {taskToEdit && taskToEdit.dueDate && (
-              <a
-                href={createGoogleCalendarUrl(taskToEdit)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-indigo-500 hover:underline"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>Synchroniser Google Calendar</span>
-              </a>
-            )}
+            <div className="flex items-center gap-3">
+              {taskToEdit && onDelete && (
+                <button
+                  type="button"
+                  onClick={() => { onDelete(taskToEdit.id); handleCloseModal(); }}
+                  className="inline-flex items-center gap-1 text-rose-500 hover:underline"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Supprimer</span>
+                </button>
+              )}
+              {taskToEdit && taskToEdit.dueDate && (
+                <button
+                  type="button"
+                  onClick={() => void openExternal(createGoogleCalendarUrl(taskToEdit))}
+                  className="inline-flex items-center gap-1 text-indigo-500 hover:underline"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Google Agenda</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -723,6 +830,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/25 transition-all"
             >
               {taskToEdit ? 'Mettre à jour' : 'Créer la tâche'}
+              <kbd className="hidden sm:inline ml-2 text-[10px] opacity-60 font-sans">Ctrl+↵</kbd>
             </button>
           </div>
         </div>

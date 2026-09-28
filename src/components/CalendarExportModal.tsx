@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import { Task } from '../types';
 import { downloadIcsFile, parseIcsFile } from '../utils/export';
+import { hasApiServer } from '../utils/platform';
+import { toast } from './Toaster';
 
 interface CalendarExportModalProps {
   isOpen: boolean;
@@ -35,10 +37,14 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const calendarFeedUrl = `${origin}/api/calendar/feed.ics?code=${syncCode}`;
 
-  const handleCopyFeed = () => {
-    navigator.clipboard.writeText(calendarFeedUrl);
-    setCopiedFeed(true);
-    setTimeout(() => setCopiedFeed(false), 2000);
+  const handleCopyFeed = async () => {
+    try {
+      await navigator.clipboard.writeText(calendarFeedUrl);
+      setCopiedFeed(true);
+      setTimeout(() => setCopiedFeed(false), 2000);
+    } catch {
+      toast('Copie impossible.', { tone: 'error' });
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -51,10 +57,9 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
         const parsed = parseIcsFile(content);
         if (parsed.length > 0) {
           onImportTasks(parsed);
-          alert(`${parsed.length} événements importés avec succès !`);
           onClose();
         } else {
-          alert('Aucun événement trouvé dans ce fichier .ics.');
+          toast('Aucun événement trouvé dans ce fichier .ics.', { tone: 'error' });
         }
       }
     };
@@ -63,8 +68,11 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="relative w-full max-w-lg rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6 sm:p-7 text-zinc-900 dark:text-zinc-100 space-y-6">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div role="dialog" aria-modal="true" className="relative w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6 sm:p-7 text-zinc-900 dark:text-zinc-100 space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800">
           <div className="flex items-center gap-2">
@@ -92,7 +100,7 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
         <div className="p-4 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/60 space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-semibold text-xs text-zinc-900 dark:text-white">
-              1. Téléchargement Fichier .ICS
+              Exporter en fichier .ics
             </span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-500 font-semibold">
               Universel
@@ -102,7 +110,13 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
             Exportez l'ensemble de vos échéances dans un fichier calendrier prêt à être ouvert avec n'importe quelle application.
           </p>
           <button
-            onClick={() => downloadIcsFile(tasks)}
+            onClick={async () => {
+              try {
+                if (await downloadIcsFile(tasks)) toast('Agenda .ics enregistré.');
+              } catch {
+                toast('Export .ics impossible.', { tone: 'error' });
+              }
+            }}
             className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-md transition-all mt-2"
           >
             <Download className="w-3.5 h-3.5" />
@@ -110,18 +124,19 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
           </button>
         </div>
 
-        {/* Method 2: Live Subscription Feed URL */}
+        {/* Method 2: Live Subscription Feed URL (serveur uniquement) */}
+        {hasApiServer() && (
         <div className="p-4 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/60 space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-semibold text-xs text-zinc-900 dark:text-white">
-              2. Flux d'Abonnement en Temps Réel
+              Flux d'abonnement
             </span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold">
               Synchro Auto
             </span>
           </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Ajoutez cette URL dans Google Calendar (« Ajouter un calendrier via une URL ») pour une synchronisation automatique en continu.
+            Ajoutez cette URL dans votre agenda (« Ajouter via une URL »). Elle sert la dernière sauvegarde envoyée au serveur depuis « Sauvegarde & synchronisation ».
           </p>
           <div className="flex items-center gap-2 p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-xs font-mono">
             <span className="truncate flex-1 text-zinc-600 dark:text-zinc-300">
@@ -135,12 +150,13 @@ export const CalendarExportModal: React.FC<CalendarExportModalProps> = ({
             </button>
           </div>
         </div>
+        )}
 
         {/* Method 3: Import Existing Calendar */}
         <div className="p-4 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/60 space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-semibold text-xs text-zinc-900 dark:text-white">
-              3. Importer votre Calendrier Existant
+              Importer un calendrier existant
             </span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-500 font-semibold">
               Rétro-Synchro

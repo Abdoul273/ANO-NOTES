@@ -16,6 +16,8 @@ import {
   Zap,
 } from 'lucide-react';
 import { ViewMode, FilterOptions, Task } from '../types';
+import { isOverdue, isUrgentNow } from '../utils/scoring';
+import { isSameLocalDay } from '../utils/dates';
 
 interface SidebarProps {
   viewMode: ViewMode;
@@ -40,8 +42,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const totalTasks = tasks.length;
   const completedTasks = tasks.filter(t => t.completed).length;
-  const urgentTasks = tasks.filter(t => !t.completed && (t.priority === 'urgent' || (t.aiUrgencyScore || 0) >= 80)).length;
-  const overdueTasks = tasks.filter(t => !t.completed && t.dueDate && new Date(t.dueDate).getTime() < Date.now()).length;
+  const urgentTasks = tasks.filter(t => isUrgentNow(t)).length;
+  const overdueTasks = tasks.filter(t => isOverdue(t)).length;
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   const views = [
@@ -55,8 +57,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const quickFilters = [
     { id: 'all', label: 'Toutes les tâches', count: totalTasks, icon: ListTodo },
-    { id: 'today', label: 'Aujourd\'hui', count: tasks.filter(t => !t.completed && t.dueDate && new Date(t.dueDate).toDateString() === new Date().toDateString()).length, icon: Clock },
-    { id: 'ai_prioritized', label: 'Priorités IA Élevées', count: urgentTasks, icon: Sparkles, color: 'text-amber-500' },
+    { id: 'today', label: 'Aujourd\'hui', count: tasks.filter(t => !t.completed && t.dueDate && (isSameLocalDay(t.dueDate) || isOverdue(t))).length, icon: Clock },
+    { id: 'upcoming', label: 'À venir', count: tasks.filter(t => !t.completed && (!t.dueDate || new Date(t.dueDate).getTime() >= Date.now())).length, icon: CalendarDays },
+    { id: 'ai_prioritized', label: 'Priorités élevées', count: urgentTasks, icon: Sparkles, color: 'text-amber-500' },
     { id: 'overdue', label: 'En retard', count: overdueTasks, icon: AlertTriangle, color: overdueTasks > 0 ? 'text-rose-500' : '' },
     { id: 'completed', label: 'Terminées', count: completedTasks, icon: CheckCircle2, color: 'text-emerald-500' },
   ];
@@ -92,7 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           Vues de Travail
         </div>
         <div className="space-y-1">
-          {views.map(v => {
+          {views.map((v, index) => {
             const Icon = v.icon;
             const active = viewMode === v.id;
             return (
@@ -106,7 +109,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }`}
               >
                 <Icon className={`w-4 h-4 ${active ? 'text-white' : 'text-zinc-400'}`} />
-                <span>{v.label}</span>
+                <span className="flex-1 text-left">{v.label}</span>
+                <kbd className={`text-[10px] font-sans ${active ? 'text-indigo-200' : 'text-zinc-400/70'}`}>{index + 1}</kbd>
               </button>
             );
           })}
@@ -125,7 +129,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             return (
               <button
                 key={f.id}
-                onClick={() => setFilters(prev => ({ ...prev, viewTab: f.id as any }))}
+                onClick={() => {
+                  setFilters(prev => ({ ...prev, viewTab: f.id as FilterOptions['viewTab'] }));
+                  if (viewMode !== 'list') setViewMode('list');
+                }}
                 className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs transition-colors ${
                   active
                     ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-white font-semibold'
@@ -171,7 +178,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             return (
               <button
                 key={cat.id}
-                onClick={() => setFilters(prev => ({ ...prev, category: active ? '' : cat.name }))}
+                onClick={() => {
+                  setFilters(prev => ({ ...prev, category: active ? '' : cat.name }));
+                  if (viewMode !== 'list') setViewMode('list');
+                }}
                 className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs transition-colors ${
                   active
                     ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-white font-semibold'

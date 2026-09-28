@@ -1,11 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Sparkles, ArrowRight, Loader2, Mic, MicOff, AlertCircle } from 'lucide-react';
 import { callAiNaturalParse } from '../utils/ai';
+import { parseTaskText } from '../utils/nlp';
+import { formatDue } from '../utils/dates';
 import { Task } from '../types';
 
 interface NaturalLanguageInputProps {
   onTaskCreated: (taskData: Partial<Task>) => void;
+  categories?: { name: string }[];
 }
+
+const PRIORITY_CHIP: Record<string, [string, string]> = {
+  urgent: ['Urgente', 'bg-rose-500/10 text-rose-500 border-rose-500/30'],
+  high: ['Haute', 'bg-amber-500/10 text-amber-500 border-amber-500/30'],
+  low: ['Basse', 'bg-zinc-500/10 text-zinc-400 border-zinc-500/30'],
+};
 
 // Extend window for Web Speech API typings
 declare global {
@@ -15,7 +24,7 @@ declare global {
   }
 }
 
-export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTaskCreated }) => {
+export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTaskCreated, categories = [] }) => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -23,6 +32,8 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTa
   const [speechFeedback, setSpeechFeedback] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
+  // Aperçu en direct de ce que l'analyse a compris.
+  const preview = useMemo(() => (input.trim() ? parseTaskText(input, categories) : null), [input, categories]);
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -134,19 +145,8 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTa
 
     setIsLoading(true);
     try {
-      const parsed = await callAiNaturalParse(clean);
-      onTaskCreated({
-        title: parsed.title || clean,
-        description: parsed.description || '',
-        priority: parsed.priority || 'medium',
-        category: parsed.category || 'Travail',
-        dueDate: parsed.dueDate || null,
-        estimatedMinutes: parsed.estimatedMinutes || 30,
-        tags: parsed.tags || ['Commande-Vocale'],
-        status: 'todo',
-        subtasks: [],
-        smartReminders: [],
-      });
+      const parsed = await callAiNaturalParse(clean, categories);
+      onTaskCreated({ ...parsed, title: parsed.title || clean, status: 'todo' });
       setInput('');
       setSpeechFeedback(null);
     } catch (err) {
@@ -180,13 +180,15 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTa
           </div>
 
           <input
+            id="quick-add"
             type="text"
+            autoComplete="off"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={
               isListening
                 ? '🎙️ Parlez maintenant... (ex: "Préparer la présentation pour demain 10h urgent")'
-                : "✨ Saisie IA ou dictée vocale : ex. 'Préparer le rapport financier pour demain 14h urgent'..."
+                : "✨ Ajout rapide : « Appeler Paul demain 14h30 !! #client @Travail 20min »  (Q)"
             }
             disabled={isLoading}
             className={`w-full pl-10 pr-32 py-3 bg-white dark:bg-zinc-900 border ${
@@ -237,6 +239,22 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({ onTa
           </div>
         </div>
       </form>
+
+      {/* Aperçu de l'analyse */}
+      {preview && !speechFeedback && (
+        <div className="flex flex-wrap items-center gap-1.5 px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate max-w-[16rem]">{preview.title}</span>
+          {preview.dueDate && (
+            <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">📅 {formatDue(preview.dueDate)}</span>
+          )}
+          {PRIORITY_CHIP[preview.priority] && (
+            <span className={`px-1.5 py-0.5 rounded-md border ${PRIORITY_CHIP[preview.priority][1]}`}>{PRIORITY_CHIP[preview.priority][0]}</span>
+          )}
+          {preview.category && <span className="px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800">{preview.category}</span>}
+          {preview.estimatedMinutes !== 30 && <span className="px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800">⏱ {preview.estimatedMinutes} min</span>}
+          {preview.tags.map(tag => <span key={tag} className="px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800">#{tag}</span>)}
+        </div>
+      )}
 
       {/* Voice status feedback pill */}
       {speechFeedback && (

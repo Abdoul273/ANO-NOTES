@@ -1,8 +1,13 @@
 import { jsPDF } from 'jspdf';
 import { Task } from '../types';
+import { saveFile } from './platform';
+import { localDateKey } from './dates';
+import { urgencyScore, isUrgentNow } from './scoring';
+
+const stamp = () => localDateKey(new Date());
 
 // RFC 4180 CSV Export with Excel UTF-8 BOM
-export const exportTasksToCSV = (tasks: Task[], filename = 'auratask-export.csv') => {
+export const exportTasksToCSV = (tasks: Task[], filename = `auratask-${stamp()}.csv`) => {
   const headers = [
     'ID',
     'Titre',
@@ -14,7 +19,7 @@ export const exportTasksToCSV = (tasks: Task[], filename = 'auratask-export.csv'
     'Temps Estime (min)',
     'Temps Passe (min)',
     'Complete',
-    'Score Urgence IA',
+    'Score Urgence',
     'Sous-taches',
     'Tags',
     'Cree le',
@@ -37,22 +42,14 @@ export const exportTasksToCSV = (tasks: Task[], filename = 'auratask-export.csv'
     escapeCSV(t.estimatedMinutes),
     escapeCSV(t.timeSpentMinutes),
     escapeCSV(t.completed ? 'Oui' : 'Non'),
-    escapeCSV(t.aiUrgencyScore || ''),
-    escapeCSV(t.subtasks.map(s => `[${s.completed ? 'x' : ' '}] ${s.title}`).join(' | ')),
-    escapeCSV(t.tags.join(', ')),
+    escapeCSV(urgencyScore(t)),
+    escapeCSV((t.subtasks || []).map(s => `[${s.completed ? 'x' : ' '}] ${s.title}`).join(' | ')),
+    escapeCSV((t.tags || []).join(', ')),
     escapeCSV(new Date(t.createdAt).toLocaleDateString('fr-FR')),
   ]);
 
   const csvContent = '\uFEFF' + [headers.map(escapeCSV).join(';'), ...rows.map(r => r.join(';'))].join('\r\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', filename);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  return saveFile(filename, csvContent, 'text/csv;charset=utf-8');
 };
 
 // Elegant PDF Productivity Report using jsPDF
@@ -66,7 +63,7 @@ export const exportTasksToPDF = (tasks: Task[], title = 'Rapport de Productivit�
   const total = tasks.length;
   const completed = tasks.filter(t => t.completed).length;
   const pending = total - completed;
-  const urgent = tasks.filter(t => !t.completed && (t.priority === 'urgent' || (t.aiUrgencyScore || 0) >= 80)).length;
+  const urgent = tasks.filter(t => isUrgentNow(t)).length;
   const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   // Header Banner
@@ -136,13 +133,13 @@ export const exportTasksToPDF = (tasks: Task[], title = 'Rapport de Productivit�
   // Render tasks
   const sorted = [...tasks].sort((a, b) => {
     if (a.completed !== b.completed) return a.completed ? 1 : -1;
-    return (b.aiUrgencyScore || 0) - (a.aiUrgencyScore || 0);
+    return urgencyScore(b) - urgencyScore(a);
   });
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
 
-  sorted.slice(0, 18).forEach((task) => {
+  sorted.forEach((task) => {
     if (currentY > 270) {
       doc.addPage();
       currentY = 20;
@@ -158,7 +155,7 @@ export const exportTasksToPDF = (tasks: Task[], title = 'Rapport de Productivit�
       doc.text('Terminé', 18, currentY + 5);
     } else {
       doc.setTextColor(79, 70, 229);
-      doc.text(task.status === 'in_progress' ? 'En cours' : 'À faire', 18, currentY + 5);
+      doc.text(task.status === 'in_progress' ? 'En cours' : task.status === 'waiting' ? 'En attente' : 'À faire', 18, currentY + 5);
     }
 
     // Title (truncate if too long)
@@ -190,14 +187,14 @@ export const exportTasksToPDF = (tasks: Task[], title = 'Rapport de Productivit�
   doc.setTextColor(148, 163, 184);
   doc.text('AuraTask AI • Document confidentiel généré automatiquement • Compatible partage collaborateurs', 15, 287);
 
-  doc.save('auratask-rapport-productivite.pdf');
+  return saveFile(`auratask-rapport-${stamp()}.pdf`, doc.output('arraybuffer'), 'application/pdf');
 };
 
 // Generates direct Google Calendar web event URL
 export const createGoogleCalendarUrl = (task: Task): string => {
   const title = encodeURIComponent(task.title);
   const details = encodeURIComponent(
-    `${task.description || ''}\n\nPriorité: ${task.priority}\nCatégorie: ${task.category}\nScore IA: ${task.aiUrgencyScore || 'N/A'}\nLien AuraTask: https://auratask.app`
+    `${task.description || ''}\n\nPriorité: ${task.priority}\nCatégorie: ${task.category}\nScore IA: ${task.aiUrgencyScore || 'N/A'}`
   );
 
   const start = task.dueDate ? new Date(task.dueDate) : new Date();
@@ -209,102 +206,94 @@ export const createGoogleCalendarUrl = (task: Task): string => {
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dates}&details=${details}`;
 };
 
-// Download iCalendar .ics file directly in browser
-export const downloadIcsFile = (tasks: Task[], filename = 'auratask-agenda.ics') => {
-  let lines = [
+const icsEscape = (value: string) =>
+  value.replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+const icsDate = (d: Date) => d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+
+export const buildIcs = (tasks: Task[]): string => {
+  const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//AuraTask AI//Calendar Sync//FR',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     'X-WR-CALNAME:AuraTask Agenda',
-    'X-WR-TIMEZONE:UTC',
   ];
-
   tasks.forEach(t => {
     if (!t.dueDate) return;
     const d = new Date(t.dueDate);
-    const startStr = d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-    const endStr = new Date(d.getTime() + (t.estimatedMinutes || 60) * 60000).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-
-    lines.push('BEGIN:VEVENT');
-    lines.push(`UID:auratask-${t.id}@auratask.app`);
-    lines.push(`DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}Z`);
-    lines.push(`DTSTART:${startStr}`);
-    lines.push(`DTEND:${endStr}`);
-    lines.push(`SUMMARY:${t.title.replace(/[\r\n]/g, ' ')}`);
-    lines.push(`DESCRIPTION:${(t.description || '').replace(/[\r\n]/g, '\\n')}`);
-    lines.push(`STATUS:${t.completed ? 'COMPLETED' : 'CONFIRMED'}`);
-    lines.push(`PRIORITY:${t.priority === 'urgent' ? '1' : (t.priority === 'high' ? '2' : '5')}`);
-    lines.push('END:VEVENT');
+    if (isNaN(d.getTime())) return;
+    const end = new Date(d.getTime() + (t.estimatedMinutes || 60) * 60000);
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:auratask-${t.id}@auratask.app`,
+      `DTSTAMP:${icsDate(new Date())}`,
+      `DTSTART:${icsDate(d)}`,
+      `DTEND:${icsDate(end)}`,
+      `SUMMARY:${icsEscape(t.title)}`,
+      `DESCRIPTION:${icsEscape(t.description || '')}`,
+      `CATEGORIES:${icsEscape(t.category || '')}`,
+      `STATUS:${t.completed ? 'COMPLETED' : 'CONFIRMED'}`,
+      `PRIORITY:${t.priority === 'urgent' ? '1' : t.priority === 'high' ? '3' : t.priority === 'medium' ? '5' : '9'}`,
+      'END:VEVENT',
+    );
   });
-
   lines.push('END:VCALENDAR');
-
-  const content = lines.join('\r\n');
-  const blob = new Blob([content], { type: 'text/calendar;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  return lines.join('\r\n');
 };
 
-// Simple parser for importing .ics files
+export const downloadIcsFile = (tasks: Task[], filename = `auratask-agenda-${stamp()}.ics`) =>
+  saveFile(filename, buildIcs(tasks), 'text/calendar;charset=utf-8');
+
+const icsUnescape = (value: string) =>
+  value.replace(/\\n/gi, '\n').replace(/\\([,;\\])/g, '$1');
+
+// YYYYMMDD, YYYYMMDDTHHmmss (heure locale) ou YYYYMMDDTHHmmssZ (UTC)
+const parseIcsDate = (value: string): string | null => {
+  const m = value.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, , z] = m;
+  const date = h === undefined
+    ? new Date(+y, +mo - 1, +d, 23, 59, 59)
+    : z ? new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi)) : new Date(+y, +mo - 1, +d, +h, +mi);
+  return isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+// Import .ics : lignes repliées, paramètres (TZID, VALUE=DATE), UID stable pour éviter les doublons.
 export const parseIcsFile = (content: string): Partial<Task>[] => {
   const events: Partial<Task>[] = [];
-  const lines = content.split(/\r\n|\n|\r/);
-  let currentEvent: any = null;
+  const lines = content.replace(/\r?\n[ \t]/g, '').split(/\r\n|\n|\r/);
+  let current: Record<string, string> | null = null;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line === 'BEGIN:VEVENT') {
-      currentEvent = {};
-    } else if (line === 'END:VEVENT' && currentEvent) {
-      if (currentEvent.summary) {
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === 'BEGIN:VEVENT') current = {};
+    else if (line === 'END:VEVENT' && current) {
+      if (current.SUMMARY) {
+        const start = current.DTSTART ? parseIcsDate(current.DTSTART) : null;
+        const end = current.DTEND ? parseIcsDate(current.DTEND) : null;
+        const minutes = start && end ? Math.round((new Date(end).getTime() - new Date(start).getTime()) / 60000) : 0;
+        const uid = (current.UID || '').replace(/^auratask-(.+)@auratask\.app$/, '$1');
         events.push({
-          id: 'ics_' + Math.random().toString(36).substring(2, 9),
-          title: currentEvent.summary,
-          description: currentEvent.description || '',
-          dueDate: currentEvent.dtstart || new Date().toISOString(),
+          id: uid ? (uid === current.UID ? `ics_${uid}` : uid) : `ics_${Math.random().toString(36).slice(2, 11)}`,
+          title: icsUnescape(current.SUMMARY),
+          description: icsUnescape(current.DESCRIPTION || ''),
+          dueDate: start,
           priority: 'medium',
-          status: 'todo',
+          status: current.STATUS === 'COMPLETED' ? 'done' : 'todo',
+          completed: current.STATUS === 'COMPLETED',
           category: 'Calendrier Importé',
-          estimatedMinutes: 45,
-          timeSpentMinutes: 0,
-          completed: false,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          subtasks: [],
-          smartReminders: [],
+          estimatedMinutes: minutes > 0 && minutes <= 24 * 60 ? minutes : 45,
           tags: ['Calendrier'],
         });
       }
-      currentEvent = null;
-    } else if (currentEvent) {
-      if (line.startsWith('SUMMARY:')) {
-        currentEvent.summary = line.substring(8);
-      } else if (line.startsWith('DESCRIPTION:')) {
-        currentEvent.description = line.substring(12).replace(/\\n/g, '\n');
-      } else if (line.startsWith('DTSTART')) {
-        const val = line.split(':')[1];
-        if (val) {
-          // Parse YYYYMMDDTHHmmssZ or YYYYMMDD
-          if (val.length >= 8) {
-            const year = parseInt(val.substring(0, 4));
-            const month = parseInt(val.substring(4, 6)) - 1;
-            const day = parseInt(val.substring(6, 8));
-            const hour = val.length >= 13 ? parseInt(val.substring(9, 11)) : 9;
-            const min = val.length >= 15 ? parseInt(val.substring(11, 13)) : 0;
-            currentEvent.dtstart = new Date(Date.UTC(year, month, day, hour, min)).toISOString();
-          }
-        }
-      }
+      current = null;
+    } else if (current) {
+      const colon = line.indexOf(':');
+      if (colon < 0) continue;
+      const key = line.slice(0, colon).split(';')[0].toUpperCase();
+      current[key] = line.slice(colon + 1);
     }
   }
-
   return events;
 };

@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { Task } from '../types';
+import { localDateKey } from '../utils/dates';
 import { Flame, Trophy, Calendar, CheckCircle2, TrendingUp, Sparkles, Award } from 'lucide-react';
 
 interface DailyStreakTrackerProps {
@@ -20,7 +21,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({ tasks })
         const dateSource = t.completedAt || t.updatedAt || t.createdAt;
         if (dateSource) {
           const d = new Date(dateSource);
-          const key = d.toISOString().substring(0, 10);
+          const key = localDateKey(d);
           completionsByDay[key] = (completionsByDay[key] || 0) + 1;
         }
       }
@@ -33,7 +34,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({ tasks })
     for (let i = 27; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(today.getDate() - i);
-      const key = d.toISOString().substring(0, 10);
+      const key = localDateKey(d);
       daysArray.push({
         dateStr: key,
         date: d,
@@ -46,7 +47,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({ tasks })
     // Calculate current streak: consecutive days with at least 1 completed task
     let currentStreak = 0;
     const checkDate = new Date(today);
-    const todayKey = checkDate.toISOString().substring(0, 10);
+    const todayKey = localDateKey(checkDate);
     const completedToday = (completionsByDay[todayKey] || 0) > 0;
 
     // If completed today, count today and go backwards; if not yet today, start checking from yesterday
@@ -55,7 +56,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({ tasks })
     }
 
     while (true) {
-      const k = checkDate.toISOString().substring(0, 10);
+      const k = localDateKey(checkDate);
       if (completionsByDay[k] && completionsByDay[k] > 0) {
         currentStreak++;
         checkDate.setDate(checkDate.getDate() - 1);

@@ -18,6 +18,9 @@ import confetti from 'canvas-confetti';
 import { Task } from '../types';
 import { soundManager } from '../utils/audio';
 import { createGoogleCalendarUrl } from '../utils/export';
+import { openExternal } from '../utils/platform';
+import { formatDue, isSameLocalDay } from '../utils/dates';
+import { urgencyScore } from '../utils/scoring';
 
 interface TaskItemProps {
   task: Task;
@@ -53,10 +56,8 @@ export const TaskItem: React.FC<TaskItemProps> = ({
   isBeingDragged,
 }) => {
   const isOverdue = task.dueDate && !task.completed && new Date(task.dueDate).getTime() < Date.now();
-  const isToday =
-    task.dueDate &&
-    !task.completed &&
-    new Date(task.dueDate).toDateString() === new Date().toDateString();
+  const isToday = task.dueDate && !task.completed && !isOverdue && isSameLocalDay(task.dueDate);
+  const score = urgencyScore(task);
 
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -149,19 +150,19 @@ export const TaskItem: React.FC<TaskItemProps> = ({
             </h4>
 
             {/* AI Urgency Score Badge */}
-            {task.aiUrgencyScore && !task.completed && (
+            {!task.completed && (
               <span
                 className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${
-                  task.aiUrgencyScore >= 80
+                  score >= 80
                     ? 'bg-rose-500/10 text-rose-500 border-rose-500/30'
-                    : task.aiUrgencyScore >= 60
+                    : score >= 60
                     ? 'bg-amber-500/10 text-amber-500 border-amber-500/30'
                     : 'bg-indigo-500/10 text-indigo-500 border-indigo-500/30'
                 }`}
-                title="Score de priorité et urgence calculé par l'IA"
+                title={task.aiUrgencyScore !== undefined ? 'Score d\'urgence (analyse IA + échéance)' : 'Score d\'urgence (priorité + échéance)'}
               >
                 <Sparkles className="w-2.5 h-2.5" />
-                Score IA {task.aiUrgencyScore}
+                {score}
               </span>
             )}
           </div>
@@ -198,14 +199,8 @@ export const TaskItem: React.FC<TaskItemProps> = ({
                 }`}
               >
                 <Calendar className="w-3 h-3" />
-                {new Date(task.dueDate).toLocaleDateString('fr-FR', {
-                  day: 'numeric',
-                  month: 'short',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-                {isOverdue && ' (En retard)'}
-                {isToday && ' (Aujourd\'hui)'}
+                {formatDue(task.dueDate)}
+                {isOverdue && ' · en retard'}
               </span>
             )}
 
@@ -219,10 +214,21 @@ export const TaskItem: React.FC<TaskItemProps> = ({
 
             {/* Estimated time */}
             {task.estimatedMinutes > 0 && (
-              <span className="flex items-center gap-1 text-zinc-400">
+              <span className="flex items-center gap-1 text-zinc-400" title="Temps passé / estimé">
                 <Clock className="w-3 h-3" />
-                {task.estimatedMinutes}m
+                {task.timeSpentMinutes > 0 ? `${task.timeSpentMinutes}/` : ''}{task.estimatedMinutes}m
               </span>
+            )}
+
+            {task.tags?.slice(0, 3).map((tag) => (
+              <span key={tag} className="flex items-center gap-0.5 text-zinc-400">
+                <Tag className="w-3 h-3" />
+                {tag}
+              </span>
+            ))}
+
+            {task.smartReminders?.some((r) => !r.triggered) && (
+              <span className="text-indigo-400" title="Rappel programmé">🔔</span>
             )}
           </div>
 
@@ -254,16 +260,16 @@ export const TaskItem: React.FC<TaskItemProps> = ({
           )}
 
           {/* Add to Google Calendar direct link */}
-          <a
-            href={createGoogleCalendarUrl(task)}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              void openExternal(createGoogleCalendarUrl(task));
+            }}
             className="p-1.5 rounded-lg text-zinc-400 hover:text-blue-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
             title="Ajouter directement à Google Calendar"
           >
             <ExternalLink className="w-4 h-4" />
-          </a>
+          </button>
 
           {/* Delete Task */}
           <button

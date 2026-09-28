@@ -1,40 +1,64 @@
 import { Task, UserHabits, DailyBriefing } from '../types';
+import { hasApiServer } from './platform';
+import { parseTaskText } from './nlp';
+import { urgencyScore, quadrantOf } from './scoring';
+import { isValidDate } from './dates';
+
+// Dans l'app native compilée, il n'y a pas de serveur : on passe directement au mode local.
+const post = async (url: string, body: unknown) => {
+  if (!hasApiServer()) throw new Error('offline');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${url}: ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 export const callAiPrioritize = async (
   tasks: Task[],
   userHabits: UserHabits
 ): Promise<{ prioritizations: any[]; overallAnalysis: string }> => {
   try {
-    const res = await fetch('/api/ai/prioritize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tasks,
-        userHabits,
-        currentTime: new Date().toISOString(),
-      }),
-    });
-    if (!res.ok) throw new Error('API prioritize failed');
-    return await res.json();
+    const data = await post('/api/ai/prioritize', { tasks, userHabits, currentTime: new Date().toISOString() });
+    if (!Array.isArray(data.prioritizations)) throw new Error('invalid');
+    return { prioritizations: data.prioritizations, overallAnalysis: data.overallAnalysis || data.analysis || '' };
   } catch (err) {
     console.warn('Network / AI prioritize fallback:', err);
     // Intelligent client-side heuristic fallback
-    const prioritizations = tasks.map((t, idx) => {
-      const pOrder: Record<string, number> = { urgent: 4, high: 3, medium: 2, low: 1 };
-      const base = (pOrder[t.priority] || 2) * 22;
-      const score = Math.min(99, Math.max(15, base + (10 - idx * 2)));
+    const slot: Record<string, string> = {
+      matin: 'Ce matin, pendant votre pic d\'énergie',
+      aprem: 'Cet après-midi, pendant votre pic d\'énergie',
+      soir: 'En soirée, pendant votre pic d\'énergie',
+      nuit: 'En fin de journée, au calme',
+    };
+    const prioritizations = tasks.filter(t => !t.completed).map((t) => {
+      const plain = { ...t, aiUrgencyScore: undefined, aiQuadrant: undefined };
+      const score = urgencyScore(plain);
+      const due = t.dueDate ? new Date(t.dueDate).getTime() - Date.now() : Infinity;
       return {
         taskId: t.id,
         newPriorityScore: score,
-        quadrant: t.priority === 'urgent' ? 'q1_urgent_important' : (t.priority === 'high' ? 'q2_not_urgent_important' : 'q3_urgent_not_important'),
+        quadrant: quadrantOf(plain),
         suggestedPriority: t.priority,
-        suggestedSlot: 'À traiter selon votre pic de concentration',
-        reasoning: 'Priorisé localement (mode hors-ligne) selon les critères d\'urgence.',
+        suggestedSlot: due < 0 ? 'Immédiatement : l\'échéance est dépassée' : due < 86400000 ? 'Aujourd\'hui, avant l\'échéance' : slot[userHabits.energyPeak] || slot.matin,
+        reasoning: due < 0 ? 'En retard : à traiter ou replanifier maintenant.'
+          : due < 172800000 ? 'Échéance sous 48 h.'
+          : t.priority === 'urgent' || t.priority === 'high' ? 'Importante : bloquez un créneau de concentration.'
+          : 'Peut être regroupée avec d\'autres tâches rapides.',
       };
     });
     return {
       prioritizations,
-      overallAnalysis: 'Priorisation calculée en mode local/hors-ligne selon la matrice d\'impact et vos délais.',
+      overallAnalysis: 'Priorisation calculée localement selon vos échéances, priorités et votre pic d\'énergie.',
     };
   }
 };
@@ -44,30 +68,24 @@ export const callAiSmartReminders = async (
   userHabits: UserHabits
 ): Promise<{ reminders: any[]; coachingNote: string }> => {
   try {
-    const res = await fetch('/api/ai/smart-reminders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, userHabits }),
-    });
-    if (!res.ok) throw new Error('API reminders failed');
-    return await res.json();
+    const data = await post('/api/ai/smart-reminders', { task, userHabits });
+    const reminders = (data.reminders || data.recommendedReminders || []).filter((r: any) => isValidDate(r.time));
+    if (!reminders.length) throw new Error('no valid reminders');
+    return { reminders, coachingNote: data.coachingNote || data.advice || '' };
   } catch (err) {
     console.warn('Network / AI smart reminders fallback:', err);
     const now = Date.now();
+    const due = task.dueDate ? new Date(task.dueDate).getTime() : NaN;
+    const lead = Math.max(30, task.estimatedMinutes || 30) * 60000;
+    const reminders = isNaN(due) || due < now
+      ? [{ time: new Date(now + 2 * 3600000).toISOString(), label: 'Point d\'étape (dans 2 h)', reason: 'Aucune échéance future : un rappel pour s\'y mettre' }]
+      : [
+          { time: new Date(due - lead - 3600000).toISOString(), label: 'Commencer maintenant', reason: 'Laisse le temps estimé plus une heure de marge' },
+          { time: new Date(due - 15 * 60000).toISOString(), label: 'Échéance dans 15 min', reason: 'Dernière vérification avant la limite' },
+        ].filter(r => new Date(r.time).getTime() > now);
     return {
-      reminders: [
-        {
-          time: new Date(now + 2 * 3600000).toISOString(),
-          label: 'Rappel de concentration optimal (dans 2h)',
-          reason: 'Aligné avec votre tranche horaire productive',
-        },
-        {
-          time: new Date(now + 5 * 3600000).toISOString(),
-          label: 'Alerte de vérification avant fin de journée',
-          reason: 'Évite l\'accumulation en soirée',
-        },
-      ],
-      coachingNote: 'Anticipez les blocages dès le début de votre session de travail.',
+      reminders,
+      coachingNote: 'Commencez par la plus petite étape concrète pour lancer l\'élan.',
     };
   }
 };
@@ -77,13 +95,7 @@ export const callAiBreakdown = async (
   description: string
 ): Promise<{ subtasks: any[]; totalEstimatedMinutes: number; tip: string }> => {
   try {
-    const res = await fetch('/api/ai/breakdown', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, description }),
-    });
-    if (!res.ok) throw new Error('API breakdown failed');
-    return await res.json();
+    return await post('/api/ai/breakdown', { title, description });
   } catch (err) {
     console.warn('Network / AI breakdown fallback:', err);
     return {
@@ -98,27 +110,34 @@ export const callAiBreakdown = async (
   }
 };
 
-export const callAiNaturalParse = async (text: string): Promise<any> => {
+export const callAiNaturalParse = async (
+  text: string,
+  categories: { name: string }[] = []
+): Promise<Partial<Task>> => {
+  // L'analyse locale est instantanée et fiable pour les dates ; l'IA l'enrichit si elle répond.
+  const local = parseTaskText(text, categories);
+  const base: Partial<Task> = {
+    title: local.title,
+    priority: local.priority,
+    dueDate: local.dueDate,
+    estimatedMinutes: local.estimatedMinutes,
+    tags: local.tags,
+    category: local.category || categories[0]?.name || 'Travail',
+  };
   try {
-    const res = await fetch('/api/ai/parse-natural', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, currentTime: new Date().toISOString() }),
-    });
-    if (!res.ok) throw new Error('API parse natural failed');
-    return await res.json();
-  } catch (err) {
-    console.warn('Network / AI parse natural fallback:', err);
-    const isUrgent = /urgent|asap|important/i.test(text);
+    const ai = await post('/api/ai/parse-natural', { text, currentTime: new Date().toISOString() });
     return {
-      title: text.replace(/urgent|demain|ce soir/gi, '').trim() || text,
-      description: '',
-      priority: isUrgent ? 'urgent' : 'medium',
-      category: 'Travail',
-      dueDate: new Date(Date.now() + 86400000).toISOString(),
-      estimatedMinutes: 30,
-      tags: ['Saisie-Rapide'],
+      ...base,
+      title: ai.title || base.title,
+      description: ai.description || '',
+      priority: ['urgent', 'high', 'medium', 'low'].includes(ai.priority) ? ai.priority : base.priority,
+      dueDate: base.dueDate || (isValidDate(ai.dueDate) ? new Date(ai.dueDate).toISOString() : null),
+      estimatedMinutes: Number(ai.estimatedMinutes) > 0 ? Number(ai.estimatedMinutes) : base.estimatedMinutes,
+      tags: [...new Set([...(base.tags || []), ...(Array.isArray(ai.tags) ? ai.tags : [])])],
+      category: local.category || categories.find(c => c.name === ai.category)?.name || base.category,
     };
+  } catch {
+    return base;
   }
 };
 
@@ -128,21 +147,20 @@ export const callAiDailyBriefing = async (
   completedTodayCount: number
 ): Promise<DailyBriefing> => {
   try {
-    const res = await fetch('/api/ai/daily-briefing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks, userHabits, completedTodayCount }),
-    });
-    if (!res.ok) throw new Error('API briefing failed');
-    return await res.json();
+    return { ...(await post('/api/ai/daily-briefing', { tasks, userHabits, completedTodayCount })), generatedAt: new Date().toISOString() };
   } catch (err) {
     console.warn('Network / AI briefing fallback:', err);
-    const topPending = tasks.find(t => !t.completed);
+    const pending = tasks.filter(t => !t.completed).sort((a, b) => urgencyScore(b) - urgencyScore(a));
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
+    const overdue = pending.filter(t => t.dueDate && new Date(t.dueDate).getTime() < Date.now()).length;
+    const peak: Record<string, string> = { matin: 'ce matin', aprem: 'cet après-midi', soir: 'ce soir', nuit: 'en fin de journée' };
     return {
-      greeting: 'Bonjour ! Préparez une session de travail sereine et ciblée.',
-      highlightFrog: topPending?.title || 'Choisissez votre première victoire du jour',
-      energyAdvice: 'Accordez 45 minutes de concentration pure sans onglets ouverts dès ce matin.',
+      greeting: `${greeting} ! ${pending.length} tâche(s) en cours${overdue ? `, dont ${overdue} en retard` : ''} · ${completedTodayCount} terminée(s) aujourd'hui.`,
+      highlightFrog: pending[0]?.title || 'Tout est à jour : ajoutez votre prochaine victoire',
+      energyAdvice: `Réservez vos ${userHabits.focusDuration} min de concentration les plus exigeantes ${peak[userHabits.energyPeak] || 'ce matin'}.`,
       motivationalQuote: 'La régularité bat l\'intensité : chaque tâche cochée libère de la clarté mentale.',
+      generatedAt: new Date().toISOString(),
     };
   }
 };

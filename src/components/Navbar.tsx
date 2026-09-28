@@ -15,6 +15,8 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { UserProfile, UserHabits, SmartReminder, Task } from '../types';
+import { isOverdue } from '../utils/scoring';
+import { formatDue } from '../utils/dates';
 
 interface NavbarProps {
   isOnline: boolean;
@@ -48,26 +50,32 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenCalendarExport,
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
-  const [activeReminders, setActiveReminders] = useState<{ task: Task; reminder: SmartReminder }[]>([]);
 
-  // Find upcoming or triggered smart reminders
-  useEffect(() => {
-    const list: { task: Task; reminder: SmartReminder }[] = [];
-    const now = new Date().getTime();
-
-    tasks.forEach(t => {
-      if (t.completed) return;
-      t.smartReminders?.forEach(r => {
-        const rTime = new Date(r.time).getTime();
-        // within past 2 hours or next 4 hours
-        if (Math.abs(now - rTime) < 4 * 3600000 || !r.notified) {
-          list.push({ task: t, reminder: r });
-        }
-      });
+  // Rappels à venir dans les 24 h, ou déclenchés depuis moins de 2 h ; plus les tâches en retard.
+  const now = Date.now();
+  const activeReminders: { task: Task; reminder: SmartReminder }[] = [];
+  tasks.forEach(t => {
+    if (t.completed) return;
+    t.smartReminders?.forEach(r => {
+      const rTime = new Date(r.time).getTime();
+      if (isNaN(rTime)) return;
+      const upcoming = !r.triggered && rTime >= now && rTime - now < 24 * 3600000;
+      const recent = rTime <= now && now - rTime < 2 * 3600000;
+      if (upcoming || recent) activeReminders.push({ task: t, reminder: r });
     });
+  });
+  activeReminders.sort((a, b) => new Date(a.reminder.time).getTime() - new Date(b.reminder.time).getTime());
+  const overdueTasks = tasks.filter(t => isOverdue(t, now));
+  const badge = activeReminders.filter(({ reminder }) => new Date(reminder.time).getTime() <= now).length + overdueTasks.length;
 
-    setActiveReminders(list.slice(0, 5));
-  }, [tasks]);
+  useEffect(() => {
+    if (!showNotifications) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-notifications]')) setShowNotifications(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showNotifications]);
 
   return (
     <header className="sticky top-0 z-30 border-b backdrop-blur-md transition-colors bg-white/80 dark:bg-zinc-950/80 border-zinc-200 dark:border-zinc-800/80 px-4 lg:px-8 py-3">
@@ -128,16 +136,16 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {/* Notifications Popover Trigger */}
-          <div className="relative">
+          <div className="relative" data-notifications>
             <button
               onClick={() => setShowNotifications(!showNotifications)}
               className="relative p-2 rounded-lg text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-800 transition-colors"
               title="Notifications & Rappels Intelligents"
             >
               <Bell className="w-4 h-4" />
-              {activeReminders.length > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
-                  {activeReminders.length}
+              {badge > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 bg-rose-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {badge > 9 ? '9+' : badge}
                 </span>
               )}
             </button>
@@ -150,11 +158,24 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <Bell className="w-4 h-4 text-indigo-500" />
                     <span className="font-semibold text-sm text-zinc-900 dark:text-white">Rappels Intelligents</span>
                   </div>
-                  <span className="text-xs text-zinc-400">{activeReminders.length} actif(s)</span>
+                  <span className="text-xs text-zinc-400">{activeReminders.length + overdueTasks.length} élément(s)</span>
                 </div>
 
                 <div className="mt-3 space-y-2 max-h-72 overflow-y-auto">
-                  {activeReminders.length === 0 ? (
+                  {overdueTasks.slice(0, 5).map(task => (
+                    <div
+                      key={`overdue-${task.id}`}
+                      onClick={() => { onTaskClick(task); setShowNotifications(false); }}
+                      className="p-2.5 rounded-xl bg-rose-50/60 dark:bg-rose-950/20 hover:bg-rose-100/60 dark:hover:bg-rose-950/40 border border-rose-500/20 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="font-medium text-xs text-zinc-800 dark:text-zinc-200 line-clamp-1">{task.title}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-500 font-semibold shrink-0">En retard</span>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">Échéance : {formatDue(task.dueDate!)}</p>
+                    </div>
+                  ))}
+                  {activeReminders.length === 0 && overdueTasks.length === 0 ? (
                     <div className="text-center py-6 text-zinc-400 text-xs">
                       Aucun rappel en attente. Tout est sous contrôle !
                     </div>
@@ -173,7 +194,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                             {task.title}
                           </span>
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-500 font-semibold shrink-0">
-                            {new Date(reminder.time).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                            {formatDue(reminder.time)}
                           </span>
                         </div>
                         <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1 line-clamp-1">

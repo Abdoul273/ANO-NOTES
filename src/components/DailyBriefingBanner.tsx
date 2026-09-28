@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { Sparkles, Sun, ChevronRight, X, RefreshCw, Target, Zap } from 'lucide-react';
-import { DailyBriefing, Task } from '../types';
+import { DailyBriefing } from '../types';
+import { localDateKey } from '../utils/dates';
+
+const HIDDEN_KEY = 'auratask_briefing_hidden_v1';
 
 interface DailyBriefingBannerProps {
   briefing: DailyBriefing | null;
@@ -15,7 +18,12 @@ export const DailyBriefingBanner: React.FC<DailyBriefingBannerProps> = ({
   isLoading,
   onSelectFrogTask,
 }) => {
-  const [dismissed, setDismissed] = useState(false);
+  // Masqué jusqu'au lendemain
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(HIDDEN_KEY) === localDateKey(new Date()));
+  const dismiss = () => {
+    localStorage.setItem(HIDDEN_KEY, localDateKey(new Date()));
+    setDismissed(true);
+  };
 
   if (dismissed || !briefing) return null;
 
@@ -43,9 +51,14 @@ export const DailyBriefingBanner: React.FC<DailyBriefingBannerProps> = ({
             <span className="flex items-center gap-1.5">
               <Target className="w-3.5 h-3.5 text-amber-400" />
               <strong>Priorité Clé (Eat The Frog) :</strong>{' '}
-              <span className="underline decoration-indigo-400/50 underline-offset-2">
+              <button
+                type="button"
+                onClick={() => onSelectFrogTask?.(briefing.highlightFrog)}
+                title="Démarrer une session Focus sur cette tâche"
+                className="underline decoration-indigo-400/50 underline-offset-2 hover:text-indigo-500 text-left"
+              >
                 {briefing.highlightFrog}
-              </span>
+              </button>
             </span>
             <span className="hidden sm:inline text-zinc-500 dark:text-zinc-500">•</span>
             <span className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
@@ -72,7 +85,7 @@ export const DailyBriefingBanner: React.FC<DailyBriefingBannerProps> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-indigo-400' : ''}`} />
           </button>
           <button
-            onClick={() => setDismissed(true)}
+            onClick={dismiss}
             className="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800/60 border border-transparent hover:border-zinc-700 transition-colors"
             title="Masquer pour la journée"
           >

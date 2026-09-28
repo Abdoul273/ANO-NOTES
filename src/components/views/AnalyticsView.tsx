@@ -16,6 +16,10 @@ import {
 } from 'lucide-react';
 import { exportTasksToCSV, exportTasksToPDF } from '../../utils/export';
 import { DailyStreakTracker } from '../DailyStreakTracker';
+import { saveFile } from '../../utils/platform';
+import { localDateKey } from '../../utils/dates';
+import { isOverdue } from '../../utils/scoring';
+import { toast } from '../Toaster';
 
 interface AnalyticsViewProps {
   tasks: Task[];
@@ -31,7 +35,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   const total = tasks.length;
   const completed = tasks.filter((t) => t.completed).length;
   const pending = total - completed;
-  const overdue = tasks.filter((t) => !t.completed && t.dueDate && new Date(t.dueDate).getTime() < Date.now()).length;
+  const overdue = tasks.filter((t) => isOverdue(t)).length;
   const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   const totalTimeSpent = tasks.reduce((acc, t) => acc + (t.timeSpentMinutes || 0), 0);
@@ -55,32 +59,33 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   };
 
   // Handle JSON backup export
-  const handleExportJSON = () => {
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(tasks, null, 2));
-    const dl = document.createElement('a');
-    dl.setAttribute('href', dataStr);
-    dl.setAttribute('download', `auratask-backup-${new Date().toISOString().substring(0, 10)}.json`);
-    dl.click();
+  const handleExportJSON = async () => {
+    try {
+      if (await saveFile(`auratask-taches-${localDateKey(new Date())}.json`, JSON.stringify(tasks, null, 2), 'application/json')) {
+        toast('Export JSON enregistré.');
+      }
+    } catch {
+      toast('Export JSON impossible.', { tone: 'error' });
+    }
   };
 
-  // Handle JSON backup import
+  // Handle JSON backup import (tableau de tâches ou sauvegarde complète)
   const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
-        if (Array.isArray(parsed)) {
-          onImportTasks(parsed);
-          alert(`${parsed.length} tâches importées avec succès !`);
-        }
+        const list = Array.isArray(parsed) ? parsed : parsed?.tasks;
+        if (!Array.isArray(list)) throw new Error('format');
+        onImportTasks(list);
       } catch {
-        alert('Erreur lors de la lecture du fichier JSON.');
+        toast('Fichier JSON invalide.', { tone: 'error' });
       }
     };
     reader.readAsText(file);
-    e.target.value = '';
   };
 
   return (
@@ -211,7 +216,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
           {/* Export PDF Button */}
           <button
-            onClick={() => exportTasksToPDF(tasks)}
+            onClick={async () => { try { if (await exportTasksToPDF(tasks)) toast('Rapport PDF enregistré.'); } catch { toast('Export PDF impossible.', { tone: 'error' }); } }}
             className="flex items-center justify-center gap-2 p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800 hover:bg-rose-50 dark:hover:bg-rose-950/20 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700 hover:border-rose-400 transition-all font-semibold text-xs shadow-sm"
           >
             <FileText className="w-4 h-4 text-rose-500" />
@@ -220,7 +225,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
           {/* Export CSV Button */}
           <button
-            onClick={() => exportTasksToCSV(tasks)}
+            onClick={async () => { try { if (await exportTasksToCSV(tasks)) toast('Fichier CSV enregistré.'); } catch { toast('Export CSV impossible.', { tone: 'error' }); } }}
             className="flex items-center justify-center gap-2 p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/20 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700 hover:border-emerald-400 transition-all font-semibold text-xs shadow-sm"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-500" />

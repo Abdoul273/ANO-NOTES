@@ -1,5 +1,7 @@
-import React from 'react';
-import { Task, QuadrantType } from '../../types';
+import React, { useState } from 'react';
+import { Task, QuadrantType, Priority } from '../../types';
+import { quadrantOf, urgencyScore, QUADRANT_PRIORITY } from '../../utils/scoring';
+import { formatDue } from '../../utils/dates';
 import {
   Sparkles,
   AlertOctagon,
@@ -14,7 +16,8 @@ import {
 interface EisenhowerMatrixViewProps {
   tasks: Task[];
   onTaskClick: (task: Task) => void;
-  onOpenNewTaskModal: () => void;
+  onOpenNewTaskModal: (priority?: Priority) => void;
+  onMoveTask: (taskId: string, quadrant: QuadrantType) => void;
   onTriggerAiPrioritize: () => void;
   isAiPrioritizing: boolean;
 }
@@ -23,17 +26,11 @@ export const EisenhowerMatrixView: React.FC<EisenhowerMatrixViewProps> = ({
   tasks,
   onTaskClick,
   onOpenNewTaskModal,
+  onMoveTask,
   onTriggerAiPrioritize,
   isAiPrioritizing,
 }) => {
-  // Determine quadrant for each task
-  const getQuadrant = (t: Task): QuadrantType => {
-    if (t.aiQuadrant) return t.aiQuadrant;
-    if (t.priority === 'urgent') return 'q1_urgent_important';
-    if (t.priority === 'high') return 'q2_not_urgent_important';
-    if (t.priority === 'medium') return 'q3_urgent_not_important';
-    return 'q4_not_urgent_not_important';
-  };
+  const [dragOver, setDragOver] = useState<QuadrantType | null>(null);
 
   const quadrants: {
     id: QuadrantType;
@@ -116,13 +113,23 @@ export const EisenhowerMatrixView: React.FC<EisenhowerMatrixViewProps> = ({
       {/* 2x2 Quadrants Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {quadrants.map((quad) => {
-          const quadTasks = tasks.filter((t) => !t.completed && getQuadrant(t) === quad.id);
+          const quadTasks = tasks
+            .filter((t) => !t.completed && quadrantOf(t) === quad.id)
+            .sort((a, b) => urgencyScore(b) - urgencyScore(a));
           const Icon = quad.icon;
 
           return (
             <div
               key={quad.id}
-              className={`rounded-3xl border ${quad.border} ${quad.bg} p-5 flex flex-col min-h-[380px] bg-white dark:bg-zinc-900/80 shadow-sm`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(quad.id); }}
+              onDragLeave={() => setDragOver((q) => (q === quad.id ? null : q))}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(null);
+                const id = e.dataTransfer.getData('text/plain');
+                if (id) onMoveTask(id, quad.id);
+              }}
+              className={`rounded-3xl border ${quad.border} ${quad.bg} p-5 flex flex-col min-h-[380px] bg-white dark:bg-zinc-900/80 shadow-sm transition-all ${dragOver === quad.id ? 'ring-2 ring-indigo-500/60 scale-[1.01]' : ''}`}
             >
               {/* Header */}
               <div className="flex items-start justify-between pb-3 border-b border-zinc-200/60 dark:border-zinc-800">
@@ -135,22 +142,33 @@ export const EisenhowerMatrixView: React.FC<EisenhowerMatrixViewProps> = ({
                   </div>
                   <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{quad.subtitle}</p>
                 </div>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${quad.badge}`}>
-                  {quadTasks.length} tâche(s)
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${quad.badge}`}>
+                    {quadTasks.length} tâche(s)
+                  </span>
+                  <button
+                    onClick={() => onOpenNewTaskModal(QUADRANT_PRIORITY[quad.id])}
+                    className="p-1 rounded-lg text-zinc-400 hover:text-indigo-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    title="Ajouter une tâche dans ce quadrant"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               {/* Tasks List */}
               <div className="space-y-2 mt-3 flex-1 overflow-y-auto max-h-[340px] pr-1">
                 {quadTasks.length === 0 ? (
                   <div className="h-44 flex flex-col items-center justify-center text-center text-zinc-400 text-xs">
-                    <p>Aucune tâche dans ce quadrant</p>
+                    <p>Aucune tâche — glissez-en une ici</p>
                     <span className="text-[10px] text-zinc-500 mt-1">Stratégie : {quad.strategy}</span>
                   </div>
                 ) : (
                   quadTasks.map((task) => (
                     <div
                       key={task.id}
+                      draggable
+                      onDragStart={(e) => { e.dataTransfer.setData('text/plain', task.id); e.dataTransfer.effectAllowed = 'move'; }}
                       onClick={() => onTaskClick(task)}
                       className="p-3 rounded-2xl bg-white dark:bg-zinc-800/90 border border-zinc-200 dark:border-zinc-700/60 hover:border-indigo-500/50 shadow-sm cursor-pointer transition-all space-y-1.5"
                     >
@@ -158,11 +176,9 @@ export const EisenhowerMatrixView: React.FC<EisenhowerMatrixViewProps> = ({
                         <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">
                           {task.title}
                         </span>
-                        {task.aiUrgencyScore && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-500 shrink-0">
-                            {task.aiUrgencyScore}/100
-                          </span>
-                        )}
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-500 shrink-0" title="Score d'urgence">
+                          {urgencyScore(task)}
+                        </span>
                       </div>
 
                       {task.aiReasoning && (
@@ -174,11 +190,8 @@ export const EisenhowerMatrixView: React.FC<EisenhowerMatrixViewProps> = ({
                       <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1">
                         <span>{task.category || 'Général'}</span>
                         {task.dueDate && (
-                          <span>
-                            {new Date(task.dueDate).toLocaleDateString('fr-FR', {
-                              day: 'numeric',
-                              month: 'short',
-                            })}
+                          <span className={new Date(task.dueDate).getTime() < Date.now() ? 'text-rose-500 font-semibold' : ''}>
+                            {formatDue(task.dueDate)}
                           </span>
                         )}
                       </div>

@@ -14,6 +14,10 @@ import {
   Check,
 } from 'lucide-react';
 import { soundManager } from '../../utils/audio';
+import { urgencyScore, isOverdue, isUrgentNow } from '../../utils/scoring';
+import { isSameLocalDay } from '../../utils/dates';
+
+const SORT_KEY = 'auratask_list_sort_v1';
 
 interface ListViewProps {
   tasks: Task[];
@@ -36,7 +40,13 @@ export const ListView: React.FC<ListViewProps> = ({
   onStartFocus,
   onReorderTasks,
 }) => {
-  const [sortBy, setSortBy] = useState<'ai' | 'custom' | 'priority' | 'date'>('ai');
+  const [sortBy, setSortByState] = useState<'ai' | 'custom' | 'priority' | 'date'>(
+    () => (localStorage.getItem(SORT_KEY) as 'ai' | 'custom' | 'priority' | 'date') || 'ai'
+  );
+  const setSortBy = (value: typeof sortBy) => {
+    setSortByState(value);
+    localStorage.setItem(SORT_KEY, value);
+  };
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dragOverTaskId, setDragOverTaskId] = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<'top' | 'bottom' | null>(null);
@@ -49,8 +59,10 @@ export const ListView: React.FC<ListViewProps> = ({
       const q = filters.search.toLowerCase();
       const matchTitle = t.title.toLowerCase().includes(q);
       const matchDesc = t.description?.toLowerCase().includes(q);
-      const matchTag = t.tags?.some((tag) => tag.toLowerCase().includes(q));
-      if (!matchTitle && !matchDesc && !matchTag) return false;
+      const matchTag = t.tags?.some((tag) => tag.toLowerCase().includes(q.replace(/^#/, '')));
+      const matchSub = t.subtasks?.some((st) => st.title.toLowerCase().includes(q));
+      const matchCat = t.category?.toLowerCase().includes(q);
+      if (!matchTitle && !matchDesc && !matchTag && !matchSub && !matchCat) return false;
     }
 
     // Category
@@ -59,16 +71,16 @@ export const ListView: React.FC<ListViewProps> = ({
     // View tab
     if (filters.viewTab === 'today') {
       if (t.completed) return false;
+      // Aujourd'hui = échéance du jour, ou en retard (encore à faire aujourd'hui)
       if (!t.dueDate) return false;
-      const todayStr = new Date().toDateString();
-      const dueStr = new Date(t.dueDate).toDateString();
-      if (todayStr !== dueStr) return false;
+      if (!isSameLocalDay(t.dueDate) && !isOverdue(t)) return false;
+    } else if (filters.viewTab === 'overdue') {
+      if (!isOverdue(t)) return false;
+    } else if (filters.viewTab === 'ai_prioritized') {
+      if (!isUrgentNow(t)) return false;
     } else if (filters.viewTab === 'upcoming') {
       if (t.completed) return false;
-      if (!t.dueDate) return true;
-      const now = new Date();
-      const due = new Date(t.dueDate);
-      if (due < now && now.toDateString() !== due.toDateString()) return false;
+      if (isOverdue(t)) return false;
     } else if (filters.viewTab === 'completed') {
       if (!t.completed) return false;
     }
@@ -86,13 +98,14 @@ export const ListView: React.FC<ListViewProps> = ({
       return 0;
     }
     if (sortBy === 'ai') {
-      return (b.aiUrgencyScore || 0) - (a.aiUrgencyScore || 0);
+      return urgencyScore(b) - urgencyScore(a);
     }
     if (sortBy === 'priority') {
       const pMap: Record<string, number> = { urgent: 4, high: 3, medium: 2, low: 1 };
-      return (pMap[b.priority] || 0) - (pMap[a.priority] || 0);
+      return (pMap[b.priority] || 0) - (pMap[a.priority] || 0) || urgencyScore(b) - urgencyScore(a);
     }
     if (sortBy === 'date') {
+      if (!a.dueDate && !b.dueDate) return 0;
       if (!a.dueDate) return 1;
       if (!b.dueDate) return -1;
       return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
@@ -170,8 +183,8 @@ export const ListView: React.FC<ListViewProps> = ({
 
   // Groupings for intuitive visual clarity when not purely in custom manual mode:
   const isCustomMode = sortBy === 'custom';
-  const urgentGroup = sorted.filter(t => !t.completed && (t.priority === 'urgent' || (t.aiUrgencyScore || 0) >= 80));
-  const todayGroup = sorted.filter(t => !t.completed && t.dueDate && new Date(t.dueDate).toDateString() === new Date().toDateString() && !urgentGroup.includes(t));
+  const urgentGroup = sorted.filter(t => isUrgentNow(t));
+  const todayGroup = sorted.filter(t => !t.completed && t.dueDate && isSameLocalDay(t.dueDate) && !urgentGroup.includes(t));
   const upcomingGroup = sorted.filter(t => !t.completed && !urgentGroup.includes(t) && !todayGroup.includes(t));
   const completedGroup = sorted.filter(t => t.completed);
 
@@ -183,10 +196,12 @@ export const ListView: React.FC<ListViewProps> = ({
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
-            type="text"
+            id="task-search"
+            type="search"
             value={filters.search}
             onChange={(e) => setFilters((prev) => ({ ...prev, search: e.target.value }))}
-            placeholder="Rechercher une tâche, un mot-clé ou un tag..."
+            placeholder="Rechercher une tâche, un tag, une sous-tâche…  ( / )"
+            onKeyDown={(e) => { if (e.key === 'Escape') { setFilters((prev) => ({ ...prev, search: '' })); (e.target as HTMLInputElement).blur(); } }}
             className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 text-xs text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
           />
         </div>
@@ -259,8 +274,18 @@ export const ListView: React.FC<ListViewProps> = ({
             Aucune tâche trouvée
           </h3>
           <p className="text-xs text-zinc-500 max-w-sm mx-auto">
-            Utilisez la barre de saisie IA en haut ou cliquez sur « Nouvelle Tâche » pour commencer à organiser votre journée !
+            {tasks.length === 0
+              ? 'Tapez une tâche dans la barre du haut (ex. « Appeler Paul demain 14h ») ou appuyez sur N.'
+              : 'Aucune tâche ne correspond à ces filtres.'}
           </p>
+          {(filters.search || filters.category || filters.viewTab !== 'all') && (
+            <button
+              onClick={() => setFilters((prev) => ({ ...prev, search: '', category: '', viewTab: 'all' }))}
+              className="mt-4 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white"
+            >
+              Réinitialiser les filtres
+            </button>
+          )}
         </div>
       ) : isCustomMode ? (
         /* Unified Custom Drag-and-Drop Sequence */

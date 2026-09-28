@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Task, UserHabits } from '../../types';
 import {
   Play,
@@ -21,45 +21,67 @@ import {
   Clock,
 } from 'lucide-react';
 import { soundManager } from '../../utils/audio';
+import { notify, ensureNotificationPermission } from '../../utils/platform';
+import { localDateKey } from '../../utils/dates';
 import confetti from 'canvas-confetti';
 
 interface FocusZenViewProps {
   tasks: Task[];
   userHabits: UserHabits;
-  onUpdateTask: (task: Task) => void;
-  initialTask?: Task | null;
+  initialTaskId?: string | null;
+  onAddTimeSpent: (taskId: string, minutes: number) => void;
+  onCompleteTask: (taskId: string) => void;
+  onToggleSubtask: (taskId: string, subtaskId: string) => void;
 }
+
+// Le minuteur survit aux changements de vue et au redémarrage de l'app.
+const TIMER_KEY = 'auratask_focus_timer_v1';
+interface TimerState {
+  mode: 'focus' | 'break';
+  timeLeft: number;
+  endAt: number | null;
+  focusMinutes: number;
+  breakMinutes: number;
+  sessions: number;
+  sessionsDay: string;
+  taskId: string | null;
+}
+const loadTimer = (): Partial<TimerState> => {
+  try {
+    return JSON.parse(localStorage.getItem(TIMER_KEY) || '{}');
+  } catch {
+    return {};
+  }
+};
 
 export const FocusZenView: React.FC<FocusZenViewProps> = ({
   tasks,
   userHabits,
-  onUpdateTask,
-  initialTask,
+  initialTaskId,
+  onAddTimeSpent,
+  onCompleteTask,
+  onToggleSubtask,
 }) => {
-  const [selectedTask, setSelectedTask] = useState<Task | null>(
-    initialTask || tasks.find((t) => !t.completed) || null
+  const saved = useRef(loadTimer()).current;
+  const today = localDateKey(new Date());
+
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    initialTaskId || saved.taskId || tasks.find((t) => !t.completed)?.id || null
   );
+  // Toujours la version à jour de la tâche (modifiée ailleurs ou depuis le panneau).
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
 
-  // Focus duration options
-  const defaultFocusDuration = userHabits.focusDuration || 25;
-  const defaultBreakDuration = userHabits.breakDuration || 5;
+  const [focusMinutes, setFocusMinutes] = useState<number>(saved.focusMinutes || userHabits.focusDuration || 25);
+  const [breakMinutes, setBreakMinutes] = useState<number>(saved.breakMinutes || userHabits.breakDuration || 5);
 
-  const [focusMinutes, setFocusMinutes] = useState<number>(defaultFocusDuration);
-  const [breakMinutes, setBreakMinutes] = useState<number>(defaultBreakDuration);
-
-  const [mode, setMode] = useState<'focus' | 'break'>('focus');
-  const [timeLeft, setTimeLeft] = useState<number>(focusMinutes * 60);
-  const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [sessionsCompleted, setSessionsCompleted] = useState<number>(0);
+  const [mode, setMode] = useState<'focus' | 'break'>(saved.mode || 'focus');
+  const [endAt, setEndAt] = useState<number | null>(saved.endAt ?? null);
+  const [timeLeft, setTimeLeft] = useState<number>(() =>
+    saved.endAt ? Math.max(0, Math.ceil((saved.endAt - Date.now()) / 1000)) : saved.timeLeft ?? focusMinutes * 60
+  );
+  const isRunning = endAt !== null;
+  const [sessionsCompleted, setSessionsCompleted] = useState<number>(saved.sessionsDay === today ? saved.sessions || 0 : 0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Notification and Break Prompt state
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => {
-    if (typeof Notification !== 'undefined') {
-      return Notification.permission;
-    }
-    return 'default';
-  });
 
   const [sessionEndNotice, setSessionEndNotice] = useState<{
     taskTitle: string;
@@ -68,28 +90,25 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
     label: string;
   } | null>(null);
 
-  // Sync when initialTask changes
-  useEffect(() => {
-    if (initialTask) setSelectedTask(initialTask);
-  }, [initialTask]);
-
-  // Check notification permission on mount
-  useEffect(() => {
-    if (typeof Notification !== 'undefined') {
-      setNotificationPermission(Notification.permission);
-    }
-  }, []);
-
-  const requestNotificationAccess = async () => {
-    if (typeof Notification !== 'undefined') {
-      try {
-        const perm = await Notification.requestPermission();
-        setNotificationPermission(perm);
-      } catch {
-        // ignore
-      }
-    }
+  const setIsRunning = (run: boolean) => {
+    setEndAt(run ? Date.now() + timeLeft * 1000 : null);
   };
+  const setDuration = (seconds: number, run = false) => {
+    setTimeLeft(seconds);
+    setEndAt(run ? Date.now() + seconds * 1000 : null);
+  };
+
+  useEffect(() => {
+    if (initialTaskId) setSelectedTaskId(initialTaskId);
+  }, [initialTaskId]);
+
+  useEffect(() => {
+    const state: TimerState = {
+      mode, timeLeft, endAt, focusMinutes, breakMinutes,
+      sessions: sessionsCompleted, sessionsDay: today, taskId: selectedTaskId,
+    };
+    localStorage.setItem(TIMER_KEY, JSON.stringify(state));
+  }, [mode, timeLeft, endAt, focusMinutes, breakMinutes, sessionsCompleted, selectedTaskId, today]);
 
   // Calculate adaptive break based on task's estimated time and completed cycles
   const getAdaptiveBreak = (task: Task | null, cycles: number) => {
@@ -134,107 +153,84 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
 
   // Send system notification when session ends
   const notifySessionEnd = (completedMode: 'focus' | 'break', adaptive: ReturnType<typeof getAdaptiveBreak>) => {
-    // Sound
-    soundManager.playTimerBell();
-
-    // Browser Web Notification
-    if (
-      userHabits.notificationsEnabled &&
-      typeof Notification !== 'undefined' &&
-      Notification.permission === 'granted'
-    ) {
-      if (completedMode === 'focus') {
-        new Notification('🍅 Session Pomodoro Terminée !', {
-          body: `Bravo ! Prenez votre ${adaptive.label} suggérée pour recharger votre concentration.`,
-          icon: '/favicon.ico',
-        });
-      } else {
-        new Notification('⚡ Fin de la Pause !', {
-          body: 'Prêt pour une nouvelle session de concentration maximale ?',
-          icon: '/favicon.ico',
-        });
-      }
+    if (userHabits.soundEnabled) soundManager.playTimerBell();
+    if (!userHabits.notificationsEnabled) return;
+    if (completedMode === 'focus') {
+      void notify('🍅 Session terminée !', `Bravo ! Prenez votre ${adaptive.label.toLowerCase()} pour recharger votre concentration.`);
+    } else {
+      void notify('⚡ Fin de la pause', 'Prêt pour une nouvelle session de concentration ?');
     }
   };
 
-  // Timer interval loop
+  // Horloge basée sur l'heure de fin : pas de dérive quand la fenêtre est en arrière-plan.
   useEffect(() => {
-    let interval: any = null;
-    if (isRunning && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (isRunning && timeLeft === 0) {
-      if (mode === 'focus') {
-        const newCount = sessionsCompleted + 1;
-        setSessionsCompleted(newCount);
-
-        // Update task spent time
-        if (selectedTask) {
-          const updated: Task = {
-            ...selectedTask,
-            timeSpentMinutes: (selectedTask.timeSpentMinutes || 0) + focusMinutes,
-          };
-          onUpdateTask(updated);
-          setSelectedTask(updated);
-        }
-
-        // Calculate suggested break
-        const adaptive = getAdaptiveBreak(selectedTask, newCount);
-        setBreakMinutes(adaptive.minutes);
-
-        // Notify
-        notifySessionEnd('focus', adaptive);
-
-        // Set prompt banner
-        setSessionEndNotice({
-          taskTitle: selectedTask?.title || 'Session de travail',
-          suggestedBreak: adaptive.minutes,
-          advice: adaptive.advice,
-          label: adaptive.label,
-        });
-
-        // Switch to break mode
-        setMode('break');
-        setTimeLeft(adaptive.minutes * 60);
-        setIsRunning(false);
-      } else {
-        // Break completed
-        const adaptive = getAdaptiveBreak(selectedTask, sessionsCompleted);
-        notifySessionEnd('break', adaptive);
-        setMode('focus');
-        setTimeLeft(focusMinutes * 60);
-        setIsRunning(false);
-        setSessionEndNotice(null);
-      }
-    }
+    if (endAt === null) return;
+    const tick = () => setTimeLeft(Math.max(0, Math.ceil((endAt - Date.now()) / 1000)));
+    tick();
+    const interval = setInterval(tick, 250);
     return () => clearInterval(interval);
-  }, [isRunning, timeLeft, mode, selectedTask, focusMinutes, breakMinutes, sessionsCompleted, userHabits]);
+  }, [endAt]);
+
+  // Fin de session
+  useEffect(() => {
+    if (endAt === null || timeLeft > 0) return;
+    if (mode === 'focus') {
+      const newCount = sessionsCompleted + 1;
+      setSessionsCompleted(newCount);
+      if (selectedTaskId) onAddTimeSpent(selectedTaskId, focusMinutes);
+
+      const adaptive = getAdaptiveBreak(selectedTask, newCount);
+      setBreakMinutes(adaptive.minutes);
+      notifySessionEnd('focus', adaptive);
+      setSessionEndNotice({
+        taskTitle: selectedTask?.title || 'Session de travail',
+        suggestedBreak: adaptive.minutes,
+        advice: adaptive.advice,
+        label: adaptive.label,
+      });
+      setMode('break');
+      setDuration(adaptive.minutes * 60);
+    } else {
+      notifySessionEnd('break', getAdaptiveBreak(selectedTask, sessionsCompleted));
+      setMode('focus');
+      setDuration(focusMinutes * 60);
+      setSessionEndNotice(null);
+    }
+  }, [timeLeft, endAt]);
 
   const toggleTimer = () => {
-    if (!isRunning && notificationPermission === 'default') {
-      requestNotificationAccess();
-    }
+    if (!isRunning && userHabits.notificationsEnabled) void ensureNotificationPermission();
     setIsRunning(!isRunning);
   };
+  const toggleRef = useRef(toggleTimer);
+  toggleRef.current = toggleTimer;
+
+  // Espace : démarrer / suspendre
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (e.code !== 'Space' || tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return;
+      e.preventDefault();
+      toggleRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const resetTimer = () => {
-    setIsRunning(false);
-    setTimeLeft(mode === 'focus' ? focusMinutes * 60 : breakMinutes * 60);
+    setDuration(mode === 'focus' ? focusMinutes * 60 : breakMinutes * 60);
   };
 
   const handleSwitchMode = (newMode: 'focus' | 'break') => {
-    setIsRunning(false);
     setMode(newMode);
-    setTimeLeft(newMode === 'focus' ? focusMinutes * 60 : breakMinutes * 60);
+    setDuration(newMode === 'focus' ? focusMinutes * 60 : breakMinutes * 60);
     setSessionEndNotice(null);
   };
 
   const applyPreset = (focusM: number, breakM: number) => {
-    setIsRunning(false);
     setFocusMinutes(focusM);
     setBreakMinutes(breakM);
-    setTimeLeft(mode === 'focus' ? focusM * 60 : breakM * 60);
+    setDuration(mode === 'focus' ? focusM * 60 : breakM * 60);
     setSessionEndNotice(null);
   };
 
@@ -250,8 +246,7 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
   const startSuggestedBreak = (minutes: number) => {
     setBreakMinutes(minutes);
     setMode('break');
-    setTimeLeft(minutes * 60);
-    setIsRunning(true);
+    setDuration(minutes * 60, true);
     setSessionEndNotice(null);
   };
 
@@ -273,14 +268,8 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
     } catch {
       // ignore
     }
-    const updated: Task = {
-      ...selectedTask,
-      completed: true,
-      completedAt: new Date().toISOString(),
-      status: 'done',
-    };
-    onUpdateTask(updated);
-    setSelectedTask(null);
+    onCompleteTask(selectedTask.id);
+    setSelectedTaskId(tasks.find((t) => !t.completed && t.id !== selectedTask.id)?.id || null);
     setSessionEndNotice(null);
   };
 
@@ -374,17 +363,6 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
 
         {/* Right tools (Notifications & Fullscreen) */}
         <div className="flex items-center gap-2">
-          {notificationPermission !== 'granted' && (
-            <button
-              onClick={requestNotificationAccess}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-xs font-medium transition-colors"
-              title="Activer les notifications du minuteur pour la fin des sessions"
-            >
-              <Bell className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Activer alertes</span>
-            </button>
-          )}
-
           <button
             onClick={() => setIsFullscreen(!isFullscreen)}
             className="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-900 border border-zinc-800 transition-colors"
@@ -408,10 +386,7 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
         <div className="relative">
           <select
             value={selectedTask?.id || ''}
-            onChange={(e) => {
-              const found = tasks.find((t) => t.id === e.target.value);
-              setSelectedTask(found || null);
-            }}
+            onChange={(e) => setSelectedTaskId(e.target.value || null)}
             className="w-full px-4 py-2.5 rounded-2xl bg-zinc-900 border border-zinc-800 text-xs sm:text-sm font-semibold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 appearance-none pr-8 cursor-pointer"
           >
             <option value="">-- Choisir une tâche à exécuter --</option>
@@ -426,6 +401,21 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
           </select>
           <ChevronDown className="w-4 h-4 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
         </div>
+        {selectedTask && selectedTask.subtasks.length > 0 && (
+          <div className="text-left space-y-1 pt-1">
+            {selectedTask.subtasks.map((st) => (
+              <label key={st.id} className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/70 border border-zinc-800 text-xs cursor-pointer hover:border-indigo-500/40">
+                <input
+                  type="checkbox"
+                  checked={st.completed}
+                  onChange={() => { soundManager.playSubtaskCheck(); onToggleSubtask(selectedTask.id, st.id); }}
+                  className="rounded text-indigo-600"
+                />
+                <span className={st.completed ? 'line-through text-zinc-500' : 'text-zinc-200'}>{st.title}</span>
+              </label>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 4-Pomodoro Cycle Progress Indicators */}
@@ -494,7 +484,7 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
               onClick={() => {
                 setSessionEndNotice(null);
                 setMode('focus');
-                setTimeLeft(focusMinutes * 60);
+                setDuration(focusMinutes * 60, true);
               }}
               className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors"
             >
@@ -565,7 +555,7 @@ export const FocusZenView: React.FC<FocusZenViewProps> = ({
       {/* Streak / Sessions Footer */}
       <div className="mt-8 text-xs text-zinc-500 z-10 flex flex-wrap items-center justify-center gap-3">
         <span>
-          Sessions terminées aujourd'hui : <strong>{sessionsCompleted}</strong>
+          Sessions aujourd'hui : <strong>{sessionsCompleted}</strong>
         </span>
         <span>•</span>
         <span>

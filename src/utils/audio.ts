@@ -2,9 +2,11 @@
 
 class SoundManager {
   private ctx: AudioContext | null = null;
+  /** Réglé depuis les préférences (« Sons »). */
+  enabled = true;
 
   private getContext(): AudioContext | null {
-    if (typeof window === 'undefined') return null;
+    if (typeof window === 'undefined' || !this.enabled) return null;
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
