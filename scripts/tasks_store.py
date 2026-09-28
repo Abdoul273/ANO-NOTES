@@ -76,14 +76,30 @@ def write_state(state):
     os.replace(name, STORE)
 
 
+def load_state():
+    """Current store, or None when it is missing. A corrupt file is set aside
+    instead of blocking the app and the panel forever."""
+    if not STORE.exists():
+        return None
+    try:
+        state = json.loads(STORE.read_text(encoding="utf-8"))
+        if isinstance(state, dict) and isinstance(state.get("tasks"), list):
+            state["tasks"] = [t for t in state["tasks"] if isinstance(t, dict) and isinstance(t.get("id"), str)]
+            state["revision"] = int(state.get("revision", 0))
+            return state
+    except (OSError, ValueError, TypeError):
+        pass
+    STORE.replace(STORE.with_name(f"tasks.corrupt-{int(time.time())}.json"))
+    return None
+
+
 @contextmanager
 def locked_state():
     STORE.parent.mkdir(parents=True, exist_ok=True)
     with (STORE.parent / ".tasks.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if STORE.exists():
-            state = json.loads(STORE.read_text(encoding="utf-8"))
-        else:
+        state = load_state()
+        if state is None:
             state = initial_state()
             write_state(state)
         yield state

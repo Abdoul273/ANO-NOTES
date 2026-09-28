@@ -11,7 +11,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// `npm run dev -- --port 5173 --host 127.0.0.1` (lancé par `tauri dev`) doit être respecté.
+const argValue = (name: string) => {
+  const index = process.argv.indexOf(`--${name}`);
+  return index > 0 ? process.argv[index + 1] : undefined;
+};
+const PORT = Number(argValue('port') || process.env.PORT || 3000);
+const HOST = argValue('host') || process.env.HOST || '0.0.0.0';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const isProd = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '15mb' }));
@@ -75,6 +82,12 @@ interface CloudBackup {
 
 const cloudBackups = new Map<string, CloudBackup>();
 
+// Sans clé Gemini, le client bascule sur ses calculs locaux (dates, priorités, briefing).
+app.use('/api/ai', (_req, res, next) => {
+  if (!process.env.GEMINI_API_KEY) return res.status(503).json({ error: 'ai_unavailable' });
+  next();
+});
+
 // 1. AI Prioritization Endpoint
 app.post('/api/ai/prioritize', async (req, res) => {
   try {
@@ -82,29 +95,6 @@ app.post('/api/ai/prioritize', async (req, res) => {
 
     if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
       return res.json({ prioritizedTasks: [], analysis: 'Aucune tâche à prioriser.' });
-    }
-
-    if (!process.env.GEMINI_API_KEY) {
-      // Fallback smart heuristic if API key is not yet set
-      const sorted = [...tasks].sort((a, b) => {
-        const pOrder: Record<string, number> = { urgent: 4, high: 3, medium: 2, low: 1 };
-        const pA = pOrder[a.priority] || 2;
-        const pB = pOrder[b.priority] || 2;
-        if (pA !== pB) return pB - pA;
-        if (a.dueDate && b.dueDate) return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
-        return 0;
-      }).map((t, idx) => ({
-        taskId: t.id,
-        newPriorityScore: Math.max(10, 95 - idx * 8),
-        quadrant: t.priority === 'urgent' ? 'q1_urgent_important' : (t.priority === 'high' ? 'q2_not_urgent_important' : 'q3_urgent_not_important'),
-        suggestedSlot: 'Dans votre créneau de travail optimal',
-        reasoning: 'Priorisé selon la date d\'échéance et le niveau d\'impact.',
-        smartReminderTime: t.dueDate ? new Date(new Date(t.dueDate).getTime() - 2 * 3600000).toISOString() : null,
-      }));
-      return res.json({
-        prioritizations: sorted,
-        analysis: 'Priorisation automatique calculée selon vos règles d\'urgence et d\'impact.',
-      });
     }
 
     const prompt = `Tu es un expert mondial en productivité personnelle et neuro-ergonomie de travail (méthodes Eisenhower, Getting Things Done, Time-Blocking).
@@ -140,7 +130,7 @@ Retourne une réponse structurée en JSON contenant:
 - overallAnalysis: résumé stratégique en français (2-3 phrases) guidant l'utilisateur sur l'ordre optimal de sa journée.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -184,19 +174,6 @@ app.post('/api/ai/smart-reminders', async (req, res) => {
     const { task, userHabits } = req.body;
     if (!task) return res.status(400).json({ error: 'Tâche manquante' });
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.json({
-        recommendedReminders: [
-          {
-            time: new Date(Date.now() + 3600000 * 2).toISOString(),
-            label: 'Rappel d\'engagement standard (dans 2h)',
-            reason: 'Avant votre prochain créneau de focus',
-          },
-        ],
-        advice: 'Activez les notifications pour recevoir les alertes synchronisées.',
-      });
-    }
-
     const prompt = `Tu es un assistant de gestion du temps personnalisé.
 Pour la tâche suivante:
 Titre: "${task.title}"
@@ -218,7 +195,7 @@ Renvoie un JSON avec:
 - coachingNote: conseil d'efficacité en 1 phrase`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -258,18 +235,6 @@ app.post('/api/ai/breakdown', async (req, res) => {
     const { title, description } = req.body;
     if (!title) return res.status(400).json({ error: 'Titre requis' });
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.json({
-        subtasks: [
-          { title: `Clarifier le périmètre de: ${title}`, estimatedMinutes: 15 },
-          { title: 'Exécuter la phase principale de réalisation', estimatedMinutes: 45 },
-          { title: 'Revue et validation finale', estimatedMinutes: 15 },
-        ],
-        totalEstimatedMinutes: 75,
-        tip: 'Traitez la première sous-tâche pour débloquer l\'inertie.',
-      });
-    }
-
     const prompt = `Décompose cette tâche complexe en 3 à 5 sous-tâches concrètes, actionnables et sans friction:
 Titre: "${title}"
 Description: "${description || ''}"
@@ -280,7 +245,7 @@ Renvoie un JSON contenant:
 - tip: conseil pour démarrer sans procrastination`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -334,22 +299,8 @@ Extrais les informations de manière intelligente:
 - estimatedMinutes: estimation du temps en minutes (ex: 30)
 - tags: tableau de mots-clés pertinents (1 à 3 tags sans le dièse)`;
 
-    if (!process.env.GEMINI_API_KEY) {
-      // Heuristic parsing
-      const isUrgent = /urgent|asap|vite|important/i.test(text);
-      return res.json({
-        title: text.replace(/urgent|demain|ce soir/gi, '').trim(),
-        description: '',
-        priority: isUrgent ? 'urgent' : 'medium',
-        category: 'Général',
-        dueDate: new Date(Date.now() + 86400000).toISOString(),
-        estimatedMinutes: 30,
-        tags: ['focus'],
-      });
-    }
-
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -385,15 +336,6 @@ app.post('/api/ai/daily-briefing', async (req, res) => {
   try {
     const { tasks, userHabits, completedTodayCount } = req.body;
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.json({
-        greeting: 'Bonjour ! Préparez-vous à une journée fluide et productive.',
-        highlightFrog: tasks?.[0]?.title || 'Priorisez votre première tâche clé',
-        energyAdvice: 'Profitez de votre matinée pour les tâches à haute intensité cognitive.',
-        motivationalQuote: 'La concentration est le secret de la puissance dans toute action humaine.',
-      });
-    }
-
     const prompt = `Tu es un coach d'élite en productivité et bien-être mental.
 L'utilisateur a:
 - ${tasks?.length || 0} tâches en attente
@@ -411,7 +353,7 @@ Rédige un briefing quotidien percutant, chaleureux, stimulant et ultra-précis:
 - motivationalQuote: Citation percutante ou conseil court`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -546,6 +488,6 @@ if (!isProd) {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 AuraTask AI server running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 AuraTask AI server running on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
 });

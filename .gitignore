@@ -10,3 +10,6 @@ coverage/
 # natif / Tauri
 src-tauri/target
 src-tauri/gen/schemas
+
+# Python
+__pycache__/

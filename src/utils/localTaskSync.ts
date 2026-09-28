@@ -88,7 +88,11 @@ export class LocalTaskSync {
     } catch (error) {
       console.warn('Shared task store is unavailable; keeping browser tasks locally.', error);
     }
-    if (!this.timer) this.timer = setInterval(() => { void this.poll(); }, 2000);
+    if (!this.timer) {
+      this.timer = setInterval(() => { void this.poll(); }, 1500);
+      window.addEventListener('focus', this.refresh);
+      document.addEventListener('visibilitychange', this.refresh);
+    }
   }
 
   queue(tasks: Task[]): void {
@@ -106,7 +110,14 @@ export class LocalTaskSync {
   stop(): void {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    window.removeEventListener('focus', this.refresh);
+    document.removeEventListener('visibilitychange', this.refresh);
   }
+
+  /** Relit tout de suite le magasin (ex. retour sur la fenêtre après le panneau Super+Shift+T). */
+  readonly refresh = (): void => {
+    if (document.visibilityState !== 'hidden') void this.poll();
+  };
 
   private persist(): void {
     localStorage.setItem(BASE_KEY, JSON.stringify(this.baseline));
